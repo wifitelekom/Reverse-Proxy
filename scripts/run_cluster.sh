@@ -35,6 +35,8 @@ start_cluster() {
     fi
 
     echo "=== Cluster başlatılıyor ==="
+    export ENABLE_DEBUG=1
+    echo "Debug endpoint'leri aktif (ENABLE_DEBUG=1) — /debug/kill, /debug/partition"
 
     # Node A — seed olarak B'yi ve C'yi gösterir
     "$BIN_DIR/node" \

@@ -125,17 +125,41 @@ func main() {
 		json.NewEncoder(w).Encode(members)
 	})
 
-	// Chaos engineering: node'u öldür
-	mux.HandleFunc("/debug/kill", func(w http.ResponseWriter, r *http.Request) {
-		logger.Warn("kill endpoint çağrıldı — node kapatılıyor")
-		w.WriteHeader(http.StatusOK)
-		fmt.Fprintf(w, `{"status":"killing","node":"%s"}`, *nodeID)
-		// Async olarak kapat
-		go func() {
-			time.Sleep(100 * time.Millisecond)
-			cancel()
-		}()
-	})
+	// Chaos engineering endpoint'leri — sadece ENABLE_DEBUG=1 ile aktif
+	// Güvenlik: production ortamında bu endpoint'ler kapalı olmalı
+	if os.Getenv("ENABLE_DEBUG") == "1" {
+		logger.Warn("debug endpoints aktif (ENABLE_DEBUG=1) — production'da kapatın!")
+
+		// Node'u öldür
+		mux.HandleFunc("/debug/kill", func(w http.ResponseWriter, r *http.Request) {
+			logger.Warn("kill endpoint çağrıldı — node kapatılıyor")
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprintf(w, `{"status":"killing","node":"%s"}`, *nodeID)
+			go func() {
+				time.Sleep(100 * time.Millisecond)
+				cancel()
+			}()
+		})
+
+		// Node'u gossip'ten izole et (network partition simülasyonu)
+		// duration query param: örn. /debug/partition?duration=15s
+		mux.HandleFunc("/debug/partition", func(w http.ResponseWriter, r *http.Request) {
+			dur := 15 * time.Second
+			if d := r.URL.Query().Get("duration"); d != "" {
+				if parsed, err := time.ParseDuration(d); err == nil {
+					dur = parsed
+				}
+			}
+			transport.SetPaused(true)
+			time.AfterFunc(dur, func() {
+				transport.SetPaused(false)
+			})
+			logger.Warn("partition aktif", "duration", dur)
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintf(w, `{"status":"partitioned","node":"%s","duration":"%s"}`, *nodeID, dur)
+		})
+	}
 
 	httpServer := &http.Server{
 		Addr:         *serviceAddr,

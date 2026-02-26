@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 )
 
 // Backend bir backend node'u temsil eder — load balancer'ın görüşü.
+// Kalıcı nesne: ActiveConns ve proxy request'ler arasında korunur.
 type Backend struct {
 	URL         *url.URL
 	NodeID      string
@@ -23,18 +25,19 @@ type Backend struct {
 
 // Selector load balancing stratejisinin arayüzü.
 // RoundRobin ve LeastConnections bu interface'i uygular.
-// Selector backend listesini saklamaz — her Select çağrısında liste dışarıdan gelir.
 type Selector interface {
 	Select(backends []*Backend) *Backend
 }
 
 // LoadBalancer gossip membership'e dayalı HTTP reverse proxy.
 type LoadBalancer struct {
-	config     types.LBConfig
-	membership *gossip.MembershipList
-	selector   Selector
-	server     *http.Server
-	logger     *slog.Logger
+	config      types.LBConfig
+	membership  *gossip.MembershipList
+	selector    Selector
+	server      *http.Server
+	logger      *slog.Logger
+	backendPool map[string]*Backend // NodeID → kalıcı Backend nesnesi
+	poolMu      sync.RWMutex       // backendPool erişim kilidi
 }
 
 // NewLoadBalancer yeni bir LoadBalancer oluşturur.
@@ -45,10 +48,11 @@ func NewLoadBalancer(
 	logger *slog.Logger,
 ) *LoadBalancer {
 	lb := &LoadBalancer{
-		config:     cfg,
-		membership: ml,
-		selector:   selector,
-		logger:     logger,
+		config:      cfg,
+		membership:  ml,
+		selector:    selector,
+		logger:      logger,
+		backendPool: make(map[string]*Backend),
 	}
 
 	lb.server = &http.Server{
@@ -80,7 +84,7 @@ func (lb *LoadBalancer) Start(ctx context.Context) error {
 }
 
 // handleRequest her gelen HTTP request'i işler.
-// Her request'te membership listesi taze olarak okunur — gossip state'i anlık yansır.
+// Her request'te membership listesi taze okunur, backend havuzu senkronize edilir.
 func (lb *LoadBalancer) handleRequest(w http.ResponseWriter, r *http.Request) {
 	aliveNodes := lb.membership.GetAliveMembers()
 	if len(aliveNodes) == 0 {
@@ -89,7 +93,9 @@ func (lb *LoadBalancer) handleRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	backends := lb.nodeInfoToBackends(aliveNodes)
+	// Kalıcı backend havuzundan al — ActiveConns korunur
+	backends := lb.getOrSyncBackends(aliveNodes)
+
 	selected := lb.selector.Select(backends)
 	if selected == nil {
 		http.Error(w, "no backend selected", http.StatusServiceUnavailable)
@@ -109,31 +115,54 @@ func (lb *LoadBalancer) handleRequest(w http.ResponseWriter, r *http.Request) {
 	selected.proxy.ServeHTTP(w, r)
 }
 
-// nodeInfoToBackends NodeInfo slice'ını Backend slice'a dönüştürür.
-// Her request'te yeniden oluşturulur — gossip state anlık yansır.
-// 4-10 node için overhead önemsizdir.
-func (lb *LoadBalancer) nodeInfoToBackends(nodes []gossip.NodeInfo) []*Backend {
-	backends := make([]*Backend, 0, len(nodes))
+// getOrSyncBackends backend havuzunu aliveNodes ile senkronize eder.
+// Pool'da varsa mevcut Backend nesnesini döner (ActiveConns ve TCP bağlantıları korunur).
+// Yeni node için yeni Backend oluşturur.
+// Ölü node'lar havuzdan otomatik çıkar (newPool atamasıyla).
+func (lb *LoadBalancer) getOrSyncBackends(nodes []gossip.NodeInfo) []*Backend {
+	lb.poolMu.Lock()
+	defer lb.poolMu.Unlock()
+
+	newPool := make(map[string]*Backend, len(nodes))
+	result := make([]*Backend, 0, len(nodes))
 
 	for _, node := range nodes {
-		u, err := url.Parse("http://" + node.ServiceAddr)
-		if err != nil {
-			lb.logger.Error("invalid service addr", "addr", node.ServiceAddr)
-			continue
+		if existing, ok := lb.backendPool[node.ID]; ok {
+			// Mevcut Backend — ActiveConns ve ReverseProxy korunur
+			newPool[node.ID] = existing
+			result = append(result, existing)
+		} else {
+			// Yeni node — bir kez oluştur
+			b := lb.newBackend(node)
+			newPool[node.ID] = b
+			result = append(result, b)
 		}
-
-		proxy := httputil.NewSingleHostReverseProxy(u)
-		proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
-			lb.logger.Error("proxy error", "backend", node.ID, "err", err)
-			http.Error(w, "backend unavailable", http.StatusBadGateway)
-		}
-
-		backends = append(backends, &Backend{
-			URL:    u,
-			NodeID: node.ID,
-			proxy:  proxy,
-		})
 	}
 
-	return backends
+	// Dead node'lar newPool'a alınmadığı için otomatik silinir
+	lb.backendPool = newPool
+	return result
+}
+
+// newBackend tek bir NodeInfo için Backend nesnesi oluşturur.
+// ReverseProxy bir kez oluşturulur ve sonraki request'lerde yeniden kullanılır.
+func (lb *LoadBalancer) newBackend(node gossip.NodeInfo) *Backend {
+	u, err := url.Parse("http://" + node.ServiceAddr)
+	if err != nil {
+		lb.logger.Error("invalid service addr", "addr", node.ServiceAddr)
+		return nil
+	}
+
+	proxy := httputil.NewSingleHostReverseProxy(u)
+	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
+		lb.logger.Error("proxy error", "backend", node.ID, "err", err)
+		http.Error(w, "backend unavailable", http.StatusBadGateway)
+	}
+
+	lb.logger.Info("backend registered", "id", node.ID, "addr", node.ServiceAddr)
+	return &Backend{
+		URL:    u,
+		NodeID: node.ID,
+		proxy:  proxy,
+	}
 }

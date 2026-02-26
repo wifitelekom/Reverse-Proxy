@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net"
+	"sync/atomic"
 	"time"
 )
 
@@ -16,10 +17,24 @@ type ReceivedMessage struct {
 
 // Transport UDP üzerinden gossip mesajları gönderir/alır.
 // Tek bir goroutine ile dinler, fan-out için buffered channel kullanır.
+// paused: true iken gelen UDP paketler işlenmez (network partition simülasyonu).
 type Transport struct {
 	conn   *net.UDPConn
 	recvCh chan ReceivedMessage
 	logger *slog.Logger
+	paused atomic.Bool // partition simülasyonu için
+}
+
+// SetPaused gossip alımını duraklatır/devam ettirir.
+// true: gelen UDP paketler drop edilir (partition simülasyonu)
+// false: normal çalışma
+func (t *Transport) SetPaused(v bool) {
+	t.paused.Store(v)
+	if v {
+		t.logger.Warn("transport paused — gossip reception disabled (partition simulation)")
+	} else {
+		t.logger.Info("transport resumed — gossip reception enabled")
+	}
 }
 
 // NewTransport belirtilen adreste UDP dinleyen transport oluşturur.
@@ -75,6 +90,11 @@ func (t *Transport) receiveLoop(ctx context.Context) {
 				return // Context iptal edildi
 			}
 			t.logger.Error("UDP read error", "err", err)
+			continue
+		}
+
+		// Partition simülasyonu: paused ise paketi drop et
+		if t.paused.Load() {
 			continue
 		}
 

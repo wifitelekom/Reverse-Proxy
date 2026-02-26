@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"math"
 	"net/http"
 	"os"
 	"strings"
@@ -27,9 +28,10 @@ var defaultCluster = map[string]nodeConfig{
 const lbAddr = "localhost:8080"
 
 func main() {
-	cmd := flag.String("cmd", "", "Komut: kill|metrics|stress|failover")
-	nodeID := flag.String("node", "", "Hedef node ID (kill/failover için)")
+	cmd := flag.String("cmd", "", "Komut: kill|metrics|stress|failover|partition")
+	nodeID := flag.String("node", "", "Hedef node ID (kill/failover/partition için)")
 	count := flag.Int("count", 100, "Stress test için request sayısı")
+	duration := flag.Duration("duration", 15*time.Second, "Partition süresi (partition komutu için)")
 	flag.Parse()
 
 	switch *cmd {
@@ -53,12 +55,20 @@ func main() {
 		}
 		measureFailover(*nodeID)
 
+	case "partition":
+		if *nodeID == "" {
+			fmt.Fprintln(os.Stderr, "partition için -node gerekli")
+			os.Exit(1)
+		}
+		partitionNode(*nodeID, *duration)
+
 	default:
 		fmt.Fprintln(os.Stderr, "Kullanım:")
-		fmt.Fprintln(os.Stderr, "  simulator -cmd=kill -node=node-c")
+		fmt.Fprintln(os.Stderr, "  simulator -cmd=kill      -node=node-c")
+		fmt.Fprintln(os.Stderr, "  simulator -cmd=partition -node=node-b [-duration=15s]")
 		fmt.Fprintln(os.Stderr, "  simulator -cmd=metrics")
-		fmt.Fprintln(os.Stderr, "  simulator -cmd=stress -count=1000")
-		fmt.Fprintln(os.Stderr, "  simulator -cmd=failover -node=node-c")
+		fmt.Fprintln(os.Stderr, "  simulator -cmd=stress    [-count=1000]")
+		fmt.Fprintln(os.Stderr, "  simulator -cmd=failover  -node=node-c")
 		flag.Usage()
 		os.Exit(1)
 	}
@@ -83,6 +93,28 @@ func killNode(nodeID string) {
 	fmt.Printf("[%s] node öldürüldü: %s\n", time.Now().Format("15:04:05.000"), nodeID)
 }
 
+// partitionNode bir node'u gossip ağından izole eder (UDP paketleri drop edilir).
+// Node HTTP isteğlere cevap vermeye devam eder ama gossip'te görünmez olur.
+// K2: Network partition → convergence testi için kullanılır.
+func partitionNode(nodeID string, duration time.Duration) {
+	node, ok := defaultCluster[nodeID]
+	if !ok {
+		fmt.Fprintf(os.Stderr, "bilinmeyen node: %s\n", nodeID)
+		os.Exit(1)
+	}
+
+	url := fmt.Sprintf("http://%s/debug/partition?duration=%s", node.ServiceAddr, duration)
+	resp, err := http.Post(url, "application/json", nil)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "partition başarısız: %v\n", err)
+		os.Exit(1)
+	}
+	resp.Body.Close()
+	fmt.Printf("[%s] node gossip'ten izole edildi: %s (süre: %v)\n",
+		time.Now().Format("15:04:05.000"), nodeID, duration)
+	fmt.Printf("Convergence testi için: simulator -cmd=metrics\n")
+}
+
 // collectMetrics tüm node'ların membership görüşünü çeker ve karşılaştırır.
 // K2: State convergence < 10s doğrulaması için kullanılır.
 func collectMetrics() {
@@ -95,17 +127,13 @@ func collectMetrics() {
 	client := &http.Client{Timeout: 2 * time.Second}
 	fmt.Println("=== Membership Görüşleri ===")
 
-	stateMap := map[string]string{
-		"0": "ALIVE",
-		"1": "SUSPECT",
-		"2": "DEAD",
-	}
+	stateNames := []string{"ALIVE", "SUSPECT", "DEAD"}
 
 	for nodeID, node := range defaultCluster {
 		url := fmt.Sprintf("http://%s/members", node.ServiceAddr)
 		resp, err := client.Get(url)
 		if err != nil {
-			fmt.Printf("[%s] ERIŞILEMIYOR: %v\n", nodeID, err)
+			fmt.Printf("[%s] ERİŞİLEMİYOR: %v\n", nodeID, err)
 			continue
 		}
 
@@ -115,17 +143,18 @@ func collectMetrics() {
 
 		fmt.Printf("\n[%s] %d üye görülüyor:\n", nodeID, len(members))
 		for _, m := range members {
-			stateStr, ok := stateMap[fmt.Sprintf("%d", m.State)]
-			if !ok {
-				stateStr = "UNKNOWN"
+			stateName := "UNKNOWN"
+			if int(m.State) < len(stateNames) {
+				stateName = stateNames[m.State]
 			}
-			fmt.Printf("  - %s @ %s => %s\n", m.ID, m.Addr, stateStr)
+			fmt.Printf("  - %s @ %s => %s\n", m.ID, m.Addr, stateName)
 		}
 	}
 }
 
 // stressTest LB'ye N adet HTTP request gönderir ve dağılımı raporlar.
 // K6: Yük dağılım std sapması < %15 doğrulaması için kullanılır.
+// Formül düzeltmesi: gerçek standart sapma = sqrt(varyans), aktif node sayısıyla normalize.
 func stressTest(count int) {
 	fmt.Printf("=== Stress Test: %d request ===\n", count)
 
@@ -137,6 +166,7 @@ func stressTest(count int) {
 		failed  int64
 	)
 
+	// Her bilinen node için sayaç
 	nodeCounts := make(map[string]*int64)
 	for id := range defaultCluster {
 		var c int64
@@ -147,7 +177,7 @@ func stressTest(count int) {
 	unknownCounts := make(map[string]int)
 
 	var wg sync.WaitGroup
-	sem := make(chan struct{}, 20) // 20 concurrent request
+	sem := make(chan struct{}, 20)
 
 	for i := 0; i < count; i++ {
 		wg.Add(1)
@@ -170,7 +200,6 @@ func stressTest(count int) {
 
 			atomic.AddInt64(&success, 1)
 
-			// Hangi node cevap verdi?
 			var result map[string]interface{}
 			if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 				return
@@ -193,51 +222,63 @@ func stressTest(count int) {
 	fmt.Printf("  Başarısız: %d\n", failed)
 	fmt.Printf("\nNode dağılımı:\n")
 
+	// Aktif node'ları belirle (en az 1 request alan)
+	activeNodes := 0
 	total := int64(0)
 	for id, counter := range nodeCounts {
 		c := atomic.LoadInt64(counter)
 		total += c
 		fmt.Printf("  %s: %d request\n", id, c)
+		if c > 0 {
+			activeNodes++
+		}
 	}
 	for id, c := range unknownCounts {
 		fmt.Printf("  %s (bilinmeyen): %d request\n", id, c)
 	}
 
-	if total > 0 {
-		expected := float64(total) / float64(len(nodeCounts))
-		fmt.Printf("\nBeklenen dağılım: ~%.0f/node\n", expected)
+	if total > 0 && activeNodes > 0 {
+		// Beklenen dağılım: aktif node sayısına göre normalize
+		expected := float64(total) / float64(activeNodes)
+		fmt.Printf("\nAktif node sayısı: %d\n", activeNodes)
+		fmt.Printf("Beklenen dağılım: ~%.0f/node\n", expected)
 
-		// Std sapma hesapla
+		// Gerçek standart sapma = sqrt(varyans)
 		sumSq := 0.0
 		for _, counter := range nodeCounts {
 			c := float64(atomic.LoadInt64(counter))
+			if c == 0 {
+				continue // inactive node'ları hesaba katma
+			}
 			diff := c - expected
 			sumSq += diff * diff
 		}
-		stdDev := 0.0
-		if len(nodeCounts) > 0 {
-			stdDev = sumSq / float64(len(nodeCounts))
-		}
-		fmt.Printf("Std sapma (varyans): %.2f\n", stdDev)
-		pct := (stdDev / expected) * 100
-		fmt.Printf("Std sapma %%: %.1f%% (K6 hedefi: <%d%%)\n", pct, 15)
-		if pct < 15 {
+		variance := sumSq / float64(activeNodes)
+		stdDev := math.Sqrt(variance) // FIX: karekök alınmıştı eksik
+
+		fmt.Printf("Std sapma: %.2f\n", stdDev)
+		cv := (stdDev / expected) * 100 // Coefficient of Variation (%)
+		fmt.Printf("Değişim katsayısı (CV): %.1f%% (K6 hedefi: <15%%)\n", cv)
+		if cv < 15 {
 			fmt.Println("✓ K6 BAŞARILI")
 		} else {
-			fmt.Println("✗ K6 BAŞARISIZ")
+			fmt.Printf("✗ K6 BAŞARISIZ (%.1f%% > 15%%)\n", cv)
 		}
 	}
 }
 
 // measureFailover node kill'den sonra failover süresini ölçer.
 // K1: Failover < 5s doğrulaması.
+// Düzeltme:
+//   - start := time.Now() → killNode SONRASINA taşındı
+//   - İlk 200 OK yetmez: killed node'a gitmeyen 5 ardışık başarılı yanıt beklenir
 func measureFailover(nodeID string) {
 	fmt.Printf("=== Failover Testi: %s ===\n", nodeID)
 
 	client := &http.Client{Timeout: 1 * time.Second}
 	lbURL := fmt.Sprintf("http://%s/", lbAddr)
 
-	// Önce LB'nin çalıştığını doğrula
+	// LB'nin çalıştığını doğrula
 	resp, err := client.Get(lbURL)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "LB erişilemiyor: %v\n", err)
@@ -248,37 +289,58 @@ func measureFailover(nodeID string) {
 
 	// Node'u öldür
 	fmt.Printf("[%s] %s öldürülüyor...\n", time.Now().Format("15:04:05.000"), nodeID)
-	start := time.Now()
 	killNode(nodeID)
 
-	// LB'ye request atmaya devam et
-	fmt.Println("LB'ye request gönderiliyor, failover bekleniyor...")
+	// FIX: start timer killNode SONRASI — gossip'in fark etmesi gereken süreyi ölç
+	start := time.Now()
+	fmt.Println("Failover ölçümü başladı (gossip convergence bekleniyor)...")
 
-	const maxAttempts = 200
-	const pollInterval = 50 * time.Millisecond
+	const (
+		maxAttempts    = 300                  // max 15s (300 × 50ms)
+		pollInterval   = 50 * time.Millisecond
+		requiredConsec = 5                    // kaç ardışık başarılı yanıt
+	)
 
+	consecutive := 0
 	for i := 0; i < maxAttempts; i++ {
 		time.Sleep(pollInterval)
 
 		resp, err := client.Get(lbURL)
 		if err != nil {
+			consecutive = 0
 			continue
 		}
 
-		if resp.StatusCode == http.StatusOK {
-			elapsed := time.Since(start)
-			resp.Body.Close()
-			fmt.Printf("\n[%s] Failover tamamlandı!\n", time.Now().Format("15:04:05.000"))
-			fmt.Printf("Failover süresi: %v\n", elapsed.Round(time.Millisecond))
-
-			if elapsed < 5*time.Second {
-				fmt.Println("✓ K1 BAŞARILI (< 5s)")
-			} else {
-				fmt.Printf("✗ K1 BAŞARISIZ (%.1fs > 5s)\n", elapsed.Seconds())
-			}
-			return
-		}
+		// JSON body'den hangi node cevap verdi?
+		var result map[string]interface{}
+		json.NewDecoder(resp.Body).Decode(&result)
 		resp.Body.Close()
+
+		respNode, _ := result["node"].(string)
+
+		if resp.StatusCode == http.StatusOK && respNode != nodeID {
+			// Başarılı ve killed node'a gitmeyen yanıt
+			consecutive++
+			if consecutive >= requiredConsec {
+				elapsed := time.Since(start)
+				fmt.Printf("\n[%s] Failover tamamlandı! (%d ardışık başarılı yanıt)\n",
+					time.Now().Format("15:04:05.000"), requiredConsec)
+				fmt.Printf("Failover süresi: %v\n", elapsed.Round(time.Millisecond))
+
+				if elapsed < 5*time.Second {
+					fmt.Println("✓ K1 BAŞARILI (< 5s)")
+				} else {
+					fmt.Printf("✗ K1 BAŞARISIZ (%.1fs > 5s)\n", elapsed.Seconds())
+				}
+				return
+			}
+		} else {
+			// Killed node'a istek gitti veya hata — sayacı sıfırla
+			if respNode == nodeID {
+				fmt.Printf("  [!] Trafik hâlâ %s'e gidiyor (gossip henüz öğrenmedi)\n", nodeID)
+			}
+			consecutive = 0
+		}
 	}
 
 	elapsed := time.Since(start)
