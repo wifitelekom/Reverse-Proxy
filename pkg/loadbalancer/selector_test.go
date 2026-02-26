@@ -13,39 +13,25 @@ func makeBackend(id string, conns int32) *Backend {
 	return b
 }
 
-// TestRoundRobin_DeterministicOrder: aynı backend listesi → her zaman aynı sıra
-// Counter ^uint64(0) başlar: ilk AddUint64(1)=0 → ilk seçim sorted[0%3]=node-a
-// Sıra: node-a, node-b, node-c, node-a, node-b, node-c (deterministik)
-// Kritik test: backends ters sırayla verilse de sonuç değişmemeli
+// TestRoundRobin_DeterministicOrder: pre-sorted backends → belirleyici sıra.
+// Select() artık sıralama yapmıyor; getOrSyncBackends sıralı liste garanti eder.
+// Counter ^uint64(0): ilk Add → 0 → node-a, sonra node-b, node-c, node-a...
 func TestRoundRobin_DeterministicOrder(t *testing.T) {
-	// İlk RoundRobin: normal sıralı liste
-	rr1 := NewRoundRobin()
-	list1 := []*Backend{
-		makeBackend("node-c", 0),
+	rr := NewRoundRobin()
+	// Pre-sorted — getOrSyncBackends'ın sağladığı format
+	backends := []*Backend{
 		makeBackend("node-a", 0),
 		makeBackend("node-b", 0),
-	}
-
-	// İkinci RoundRobin: ters sıralı liste — sonuç aynı olmalı
-	rr2 := NewRoundRobin()
-	list2 := []*Backend{
-		makeBackend("node-a", 0),
 		makeBackend("node-c", 0),
-		makeBackend("node-b", 0),
 	}
 
-	for i := 0; i < 9; i++ {
-		bc1 := make([]*Backend, len(list1))
-		copy(bc1, list1)
-		bc2 := make([]*Backend, len(list2))
-		copy(bc2, list2)
-
-		got1 := rr1.Select(bc1)
-		got2 := rr2.Select(bc2)
-
-		if got1.NodeID != got2.NodeID {
-			t.Errorf("adım %d: farklı sıra girişi → farklı sonuç: '%s' vs '%s'",
-				i, got1.NodeID, got2.NodeID)
+	expected := []string{"node-a", "node-b", "node-c", "node-a", "node-b", "node-c"}
+	for i, want := range expected {
+		bc := make([]*Backend, len(backends))
+		copy(bc, backends)
+		got := rr.Select(bc)
+		if got.NodeID != want {
+			t.Errorf("adım %d: beklenen '%s', alınan '%s'", i, want, got.NodeID)
 		}
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -37,7 +38,8 @@ type LoadBalancer struct {
 	server      *http.Server
 	logger      *slog.Logger
 	backendPool map[string]*Backend // NodeID → kalıcı Backend nesnesi
-	poolMu      sync.RWMutex       // backendPool erişim kilidi
+	sortedCache []*Backend          // pre-sorted liste; membership değişince yenilenir
+	poolMu      sync.RWMutex       // backendPool + sortedCache erişim kilidi
 }
 
 // NewLoadBalancer yeni bir LoadBalancer oluşturur.
@@ -116,12 +118,28 @@ func (lb *LoadBalancer) handleRequest(w http.ResponseWriter, r *http.Request) {
 }
 
 // getOrSyncBackends backend havuzunu aliveNodes ile senkronize eder.
-// Pool'da varsa mevcut Backend nesnesini döner (ActiveConns ve TCP bağlantıları korunur).
-// Yeni node için yeni Backend oluşturur.
-// Ölü node'lar havuzdan otomatik çıkar (newPool atamasıyla).
+//
+// Hızlı yol (membership değişmedi): RLock ile cache kontrol, allocation yok → O(N).
+// Yavaş yol (membership değişti): write lock, pool rebuild, NodeID sort, cache güncelle.
+// Sort burada bir kez yapılır — Selector.Select() sıralama yapmaz (O(1) seçim).
 func (lb *LoadBalancer) getOrSyncBackends(nodes []gossip.NodeInfo) []*Backend {
+	// Hızlı yol: membership değişmemişse sortedCache'i döndür (allocation yok)
+	lb.poolMu.RLock()
+	if lb.sameAsCache(nodes) {
+		cached := lb.sortedCache
+		lb.poolMu.RUnlock()
+		return cached
+	}
+	lb.poolMu.RUnlock()
+
+	// Yavaş yol: write lock, pool yeniden oluştur
 	lb.poolMu.Lock()
 	defer lb.poolMu.Unlock()
+
+	// Double-check: başka goroutine aynı anda rebuild yapmış olabilir
+	if lb.sameAsCache(nodes) {
+		return lb.sortedCache
+	}
 
 	newPool := make(map[string]*Backend, len(nodes))
 	result := make([]*Backend, 0, len(nodes))
@@ -143,9 +161,29 @@ func (lb *LoadBalancer) getOrSyncBackends(nodes []gossip.NodeInfo) []*Backend {
 		}
 	}
 
-	// Dead node'lar newPool'a alınmadığı için otomatik silinir
+	// Pool yenilenince bir kez sırala — Select() artık sıralama yapmaz
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].NodeID < result[j].NodeID
+	})
+
 	lb.backendPool = newPool
+	lb.sortedCache = result
 	return result
+}
+
+// sameAsCache mevcut alive node listesi ile pool içeriğini karşılaştırır.
+// Eşleşme varsa sortedCache geçerlidir ve membership değişmemiştir.
+// poolMu kilidi (RLock veya Lock) altında çağrılmalı.
+func (lb *LoadBalancer) sameAsCache(nodes []gossip.NodeInfo) bool {
+	if len(nodes) != len(lb.backendPool) {
+		return false
+	}
+	for _, n := range nodes {
+		if _, ok := lb.backendPool[n.ID]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // newBackend tek bir NodeInfo için Backend nesnesi oluşturur.
