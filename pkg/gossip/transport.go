@@ -17,7 +17,7 @@ type ReceivedMessage struct {
 
 // Transport UDP üzerinden gossip mesajları gönderir/alır.
 // Tek bir goroutine ile dinler, fan-out için buffered channel kullanır.
-// paused: true iken gelen UDP paketler işlenmez (network partition simülasyonu).
+// paused: true iken hem gelen hem giden UDP paketler drop edilir (gerçek partition simülasyonu).
 type Transport struct {
 	conn   *net.UDPConn
 	recvCh chan ReceivedMessage
@@ -25,15 +25,15 @@ type Transport struct {
 	paused atomic.Bool // partition simülasyonu için
 }
 
-// SetPaused gossip alımını duraklatır/devam ettirir.
-// true: gelen UDP paketler drop edilir (partition simülasyonu)
+// SetPaused gossip alımını ve gönderimini duraklatır/devam ettirir.
+// true: hem gelen hem giden UDP drop edilir (çift yönlü partition simülasyonu)
 // false: normal çalışma
 func (t *Transport) SetPaused(v bool) {
 	t.paused.Store(v)
 	if v {
-		t.logger.Warn("transport paused — gossip reception disabled (partition simulation)")
+		t.logger.Warn("transport paused — gossip send/receive disabled (partition simulation)")
 	} else {
-		t.logger.Info("transport resumed — gossip reception enabled")
+		t.logger.Info("transport resumed — gossip send/receive enabled")
 	}
 }
 
@@ -115,7 +115,17 @@ func (t *Transport) receiveLoop(ctx context.Context) {
 
 // Send tek bir UDP datagram gönderir.
 // Thread-safe: UDPConn.WriteToUDP concurrent-safe.
+// Partition simülasyonu: paused iken gönderim sessizce drop edilir.
+// Adres normalizasyonu: ":port" → "127.0.0.1:port" (Windows UDP hedefi için).
 func (t *Transport) Send(addr string, msg GossipMessage) error {
+	addr = normalizeAddr(addr)
+
+	// Partition simülasyonu: paused iken outbound da drop et (çift yönlü izolasyon)
+	if t.paused.Load() {
+		t.logger.Debug("send dropped (partition active)", "addr", addr)
+		return nil
+	}
+
 	data, err := json.Marshal(msg)
 	if err != nil {
 		return err
@@ -128,6 +138,15 @@ func (t *Transport) Send(addr string, msg GossipMessage) error {
 
 	_, err = t.conn.WriteToUDP(data, udpAddr)
 	return err
+}
+
+// normalizeAddr ":port" formatını "127.0.0.1:port" olarak dönüştürür.
+// Windows'ta 0.0.0.0 UDP gönderim hedefi olarak geçersizdir.
+func normalizeAddr(addr string) string {
+	if len(addr) > 0 && addr[0] == ':' {
+		return "127.0.0.1" + addr
+	}
+	return addr
 }
 
 // Receive gelen mesajlar için channel döner.

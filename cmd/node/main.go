@@ -55,6 +55,12 @@ func main() {
 		cfg.SeedNodes = strings.Split(*seeds, ",")
 	}
 
+	// Fail-fast: geçersiz config erken yakala
+	if err := cfg.Validate(); err != nil {
+		fmt.Fprintf(os.Stderr, "geçersiz config: %v\n", err)
+		os.Exit(1)
+	}
+
 	localInfo := gossip.NodeInfo{
 		ID:            *nodeID,
 		Addr:          *gossipAddr,

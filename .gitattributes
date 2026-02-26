@@ -1,0 +1,10 @@
+# Windows batch dosyaları CRLF gerektiriyor
+*.bat text eol=crlf
+
+# Shell scriptleri LF
+*.sh text eol=lf
+
+# Go kaynak kodu — platform bağımsız
+*.go text eol=lf
+go.mod text eol=lf
+go.sum text eol=lf

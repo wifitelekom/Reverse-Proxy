@@ -1,6 +1,6 @@
 @echo off
-REM P2P Gossip Load Balancer - Windows Cluster Yönetim Scripti
-REM Kullanım: run_cluster.bat [build|start|stop|status]
+REM P2P Gossip Load Balancer - Windows Cluster Yonetim Scripti
+REM Kullanim: run_cluster.bat [build|start|stop|status]
 
 setlocal enabledelayedexpansion
 
@@ -47,28 +47,28 @@ if not exist "%LOG_DIR%" mkdir "%LOG_DIR%"
 set "ENABLE_DEBUG=1"
 echo === Cluster baslatiliyor === [ENABLE_DEBUG=1]
 
-REM Node A
-start /B "" "%BIN_DIR%\node.exe" -id=node-a -gossip=:9001 -service=:8001 -seeds=:9002,:9003 > "%LOG_DIR%\node-a.log" 2>&1
-echo [OK] node-a baslatildi (HTTP :8001, Gossip UDP :9001)
+REM Node A - gossip adresi localhost ile belirtiliyor (Windows UDP icin zorunlu)
+start /B "" "%BIN_DIR%\node.exe" -id=node-a -gossip=localhost:9001 -service=:8001 -seeds=localhost:9002,localhost:9003 > "%LOG_DIR%\node-a.log" 2>&1
+echo [OK] node-a baslatildi (HTTP :8001, Gossip UDP localhost:9001)
 
 REM Node B
-start /B "" "%BIN_DIR%\node.exe" -id=node-b -gossip=:9002 -service=:8002 -seeds=:9001,:9003 > "%LOG_DIR%\node-b.log" 2>&1
-echo [OK] node-b baslatildi (HTTP :8002, Gossip UDP :9002)
+start /B "" "%BIN_DIR%\node.exe" -id=node-b -gossip=localhost:9002 -service=:8002 -seeds=localhost:9001,localhost:9003 > "%LOG_DIR%\node-b.log" 2>&1
+echo [OK] node-b baslatildi (HTTP :8002, Gossip UDP localhost:9002)
 
 REM Node C
-start /B "" "%BIN_DIR%\node.exe" -id=node-c -gossip=:9003 -service=:8003 -seeds=:9001,:9002 > "%LOG_DIR%\node-c.log" 2>&1
-echo [OK] node-c baslatildi (HTTP :8003, Gossip UDP :9003)
+start /B "" "%BIN_DIR%\node.exe" -id=node-c -gossip=localhost:9003 -service=:8003 -seeds=localhost:9001,localhost:9002 > "%LOG_DIR%\node-c.log" 2>&1
+echo [OK] node-c baslatildi (HTTP :8003, Gossip UDP localhost:9003)
 
 REM Node D
-start /B "" "%BIN_DIR%\node.exe" -id=node-d -gossip=:9004 -service=:8004 -seeds=:9001,:9002 > "%LOG_DIR%\node-d.log" 2>&1
-echo [OK] node-d baslatildi (HTTP :8004, Gossip UDP :9004)
+start /B "" "%BIN_DIR%\node.exe" -id=node-d -gossip=localhost:9004 -service=:8004 -seeds=localhost:9001,localhost:9002 > "%LOG_DIR%\node-d.log" 2>&1
+echo [OK] node-d baslatildi (HTTP :8004, Gossip UDP localhost:9004)
 
 echo Gossip convergence bekleniyor (1s)...
 timeout /T 1 /NOBREAK > nul
 
 REM Load Balancer
-start /B "" "%BIN_DIR%\loadbalancer.exe" -listen=:8080 -strategy=roundrobin -gossip=:9000 -seeds=:9001,:9002,:9003,:9004 > "%LOG_DIR%\lb.log" 2>&1
-echo [OK] loadbalancer baslatildi (HTTP :8080, Gossip UDP :9000)
+start /B "" "%BIN_DIR%\loadbalancer.exe" -listen=:8080 -strategy=roundrobin -gossip=localhost:9000 -seeds=localhost:9001,localhost:9002,localhost:9003,localhost:9004 > "%LOG_DIR%\lb.log" 2>&1
+echo [OK] loadbalancer baslatildi (HTTP :8080, Gossip UDP localhost:9000)
 
 echo.
 echo === Cluster hazir ===

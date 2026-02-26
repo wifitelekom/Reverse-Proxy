@@ -54,6 +54,12 @@ func main() {
 		cfg.Protocol.SeedNodes = cfg.SeedNodes
 	}
 
+	// Fail-fast: geçersiz protocol config erken yakala
+	if err := cfg.Protocol.Validate(); err != nil {
+		fmt.Fprintf(os.Stderr, "geçersiz protocol config: %v\n", err)
+		os.Exit(1)
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
