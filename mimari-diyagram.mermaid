@@ -1,0 +1,63 @@
+---
+title: P2P Gossip Tabanlı Dinamik Yük Dengeleyici - Sistem Mimarisi
+---
+graph TB
+    subgraph Clients["🌐 İstemci Katmanı"]
+        C1["HTTP Client"]
+        C2["Web Browser"]
+        C3["API Consumer"]
+    end
+
+    subgraph LB["⚖️ Yük Dengeleyici Katmanı"]
+        direction TB
+        PROXY["Reverse Proxy<br/>TCP/HTTP Listener"]
+        subgraph Strategies["Dağıtım Stratejileri"]
+            RR["Round-Robin"]
+            LC["Least-Connections"]
+        end
+        ML["MembershipList Reader<br/>(RWMutex - Thread Safe)"]
+    end
+
+    subgraph P2P["🔗 P2P Gossip Ağı (SWIM Protokolü)"]
+        direction LR
+        N1["Node-A<br/>:8001 HTTP<br/>:9001 UDP"]
+        N2["Node-B<br/>:8002 HTTP<br/>:9002 UDP"]
+        N3["Node-C<br/>:8003 HTTP<br/>:9003 UDP"]
+        N4["Node-D<br/>:8004 HTTP<br/>:9004 UDP"]
+
+        N1 <-->|"PING/ACK<br/>UDP Gossip"| N2
+        N2 <-->|"PING/ACK<br/>UDP Gossip"| N3
+        N3 <-->|"PING/ACK<br/>UDP Gossip"| N4
+        N1 <-->|"PING-REQ<br/>Indirect"| N3
+        N2 <-->|"State Sync<br/>Piggyback"| N4
+    end
+
+    subgraph Simulator["🔧 Hata Simülasyonu"]
+        KILL["Node Kill"]
+        PART["Network Partition"]
+        METRIC["Metrik Toplama"]
+    end
+
+    C1 & C2 & C3 -->|"TCP/HTTP"| PROXY
+    PROXY --> RR & LC
+    RR & LC -->|"Sağlıklı sunuculara<br/>yönlendirme"| ML
+    ML -.->|"Dinamik liste<br/>okuma"| N1 & N2 & N3 & N4
+
+    KILL -.->|"Process Kill"| N3
+    PART -.->|"iptables/filter"| N2
+    METRIC -.->|"Failover süresi<br/>ölçümü"| LB
+
+    style Clients fill:#D6EAF8,stroke:#2E86C1,stroke-width:2px
+    style LB fill:#D5F5E3,stroke:#117A65,stroke-width:2px
+    style P2P fill:#FEF9E7,stroke:#D4AC0D,stroke-width:2px
+    style Simulator fill:#FADBD8,stroke:#CB4335,stroke-width:2px
+
+    style PROXY fill:#117A65,color:#fff,stroke:#117A65
+    style RR fill:#1B4F72,color:#fff,stroke:#1B4F72
+    style LC fill:#1B4F72,color:#fff,stroke:#1B4F72
+    style ML fill:#2E86C1,color:#fff,stroke:#2E86C1
+
+    style N1 fill:#D4AC0D,color:#fff,stroke:#D4AC0D
+    style N2 fill:#D4AC0D,color:#fff,stroke:#D4AC0D
+    style N3 fill:#D4AC0D,color:#fff,stroke:#D4AC0D
+    style N4 fill:#D4AC0D,color:#fff,stroke:#D4AC0D

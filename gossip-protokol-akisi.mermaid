@@ -1,0 +1,55 @@
+---
+title: SWIM Gossip Protokolü - Arıza Tespit Akışı
+---
+sequenceDiagram
+    participant A as Node-A
+    participant B as Node-B (Hedef)
+    participant C as Node-C (Aracı)
+    participant D as Node-D (Aracı)
+
+    Note over A,D: === Senaryo 1: Normal Ping/Ack ===
+
+    A->>B: PING (+ piggyback üyelik bilgisi)
+    B->>A: ACK (+ kendi üyelik bilgisi)
+    Note over A: B = ALIVE ✅
+
+    Note over A,D: === Senaryo 2: Indirect Ping (B cevap vermezse) ===
+
+    A->>B: PING
+    Note over A: ⏱️ T_ping timeout (500ms)
+    Note over A: B'den ACK gelmedi!
+
+    A->>C: PING-REQ (B'yi kontrol et)
+    A->>D: PING-REQ (B'yi kontrol et)
+
+    C->>B: PING (A adına)
+    D->>B: PING (A adına)
+
+    B->>C: ACK
+    C->>A: ACK (B cevap verdi)
+    Note over A: B = ALIVE ✅ (dolaylı doğrulama)
+
+    Note over A,D: === Senaryo 3: Node Arızası ===
+
+    A->>B: PING
+    Note over A: ⏱️ T_ping timeout
+    A->>C: PING-REQ
+    A->>D: PING-REQ
+    C->>B: PING
+    D->>B: PING
+    Note over C,D: ⏱️ T_indirect timeout
+    Note over A: Hiçbir aracıdan ACK gelmedi!
+    Note over A: B = SUSPECT ⚠️
+
+    Note over A: ⏱️ T_suspect (3s) bekleniyor...
+    Note over B: B incarnation artırarak<br/>kendini savunabilir
+
+    alt B kendini savunamazsa
+        Note over A: B = DEAD ❌
+        A->>C: Gossip: B artık DEAD
+        A->>D: Gossip: B artık DEAD
+        Note over A,D: Load Balancer B'ye trafik göndermez
+    else B incarnation artırırsa
+        B->>A: ALIVE (incarnation++)
+        Note over A: B = ALIVE ✅ (geri döndü)
+    end

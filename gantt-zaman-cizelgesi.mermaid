@@ -1,0 +1,29 @@
+---
+title: P2P Load Balancer - 14 Haftalık Proje Zaman Çizelgesi
+---
+gantt
+    dateFormat  YYYY-MM-DD
+    axisFormat  Hafta %W
+    tickInterval 1week
+
+    section Faz 1 - P2P Gossip
+    Proje Kurulumu & Types         :f1t1, 2025-09-15, 7d
+    UDP Transport Katmanı          :f1t2, after f1t1, 7d
+    Membership Yönetimi            :f1t3, after f1t2, 7d
+    SWIM Döngüleri (Ping/Ack)      :f1t4, after f1t3, 7d
+    Gossip Entegrasyon Testi       :f1t5, after f1t4, 7d
+
+    section Faz 2 - Load Balancer
+    Reverse Proxy Geliştirme       :f2t1, after f1t5, 7d
+    RoundRobin & LeastConn         :f2t2, after f2t1, 7d
+    LB + Gossip Entegrasyonu       :f2t3, after f2t2, 7d
+
+    section Faz 3 - Test & Metrik
+    Chaos Engine (Simülatör)       :f3t1, after f2t3, 7d
+    Metrik Toplama & Analiz        :f3t2, after f3t1, 7d
+    Stres Testi & Benchmark        :f3t3, after f3t2, 7d
+
+    section Faz 4 - Dokümantasyon
+    Proje Raporu Yazımı            :f4t1, after f3t3, 7d
+    Sunum & Demo Hazırlığı         :f4t2, after f4t1, 7d
+    Final Teslim                   :milestone, f4m1, after f4t2, 0d
