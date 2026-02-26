@@ -1,6 +1,9 @@
 package types
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 // ProtocolConfig SWIM protokol parametrelerini tutar.
 // Tüm timing değerleri buradan merkezi olarak kontrol edilir.
@@ -28,6 +31,27 @@ func DefaultConfig() ProtocolConfig {
 		SuspectTimeout:   3 * time.Second,
 		IndirectNodes:    3,
 	}
+}
+
+// Validate konfigürasyon tutarsızlıklarını erken yakalar.
+// Servis başlamadan önce çağrılmalı.
+func (c ProtocolConfig) Validate() error {
+	if c.NodeID == "" {
+		return fmt.Errorf("NodeID boş olamaz")
+	}
+	if c.GossipAddr == "" {
+		return fmt.Errorf("GossipAddr boş olamaz")
+	}
+	if c.IndirectNodes <= 0 {
+		return fmt.Errorf("IndirectNodes > 0 olmalı, alınan: %d", c.IndirectNodes)
+	}
+	if c.PingTimeout >= c.IndirectTimeout {
+		return fmt.Errorf("PingTimeout (%v) < IndirectTimeout (%v) olmalı", c.PingTimeout, c.IndirectTimeout)
+	}
+	if c.SuspectTimeout <= c.IndirectTimeout {
+		return fmt.Errorf("SuspectTimeout (%v) > IndirectTimeout (%v) olmalı", c.SuspectTimeout, c.IndirectTimeout)
+	}
+	return nil
 }
 
 // LBConfig load balancer yapılandırmasını tutar.

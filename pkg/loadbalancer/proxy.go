@@ -134,6 +134,10 @@ func (lb *LoadBalancer) getOrSyncBackends(nodes []gossip.NodeInfo) []*Backend {
 		} else {
 			// Yeni node — bir kez oluştur
 			b := lb.newBackend(node)
+			if b == nil {
+				// URL parse hatası — bu node'u atla
+				continue
+			}
 			newPool[node.ID] = b
 			result = append(result, b)
 		}

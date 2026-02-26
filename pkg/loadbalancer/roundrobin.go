@@ -13,8 +13,9 @@ type RoundRobin struct {
 }
 
 // NewRoundRobin yeni bir RoundRobin selector oluşturur.
+// counter ^uint64(0) (maxUint64) ile başlar: ilk AddUint64(1) → 0 → index 0 seçilir.
 func NewRoundRobin() *RoundRobin {
-	return &RoundRobin{}
+	return &RoundRobin{counter: ^uint64(0)}
 }
 
 // Select sıradaki backend'i döner.

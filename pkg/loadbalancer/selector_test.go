@@ -14,8 +14,8 @@ func makeBackend(id string, conns int32) *Backend {
 }
 
 // TestRoundRobin_DeterministicOrder: aynı backend listesi → her zaman aynı sıra
-// Counter 0'dan başlar: AddUint64(1)=1 → ilk seçim sorted[1%3]=node-b
-// Sıra: node-b, node-c, node-a, node-b, node-c, node-a (deterministik)
+// Counter ^uint64(0) başlar: ilk AddUint64(1)=0 → ilk seçim sorted[0%3]=node-a
+// Sıra: node-a, node-b, node-c, node-a, node-b, node-c (deterministik)
 // Kritik test: backends ters sırayla verilse de sonuç değişmemeli
 func TestRoundRobin_DeterministicOrder(t *testing.T) {
 	// İlk RoundRobin: normal sıralı liste

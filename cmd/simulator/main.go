@@ -138,7 +138,9 @@ func collectMetrics() {
 		}
 
 		var members []memberInfo
-		json.NewDecoder(resp.Body).Decode(&members)
+		if err := json.NewDecoder(resp.Body).Decode(&members); err != nil {
+			fmt.Fprintf(os.Stderr, "[%s] JSON decode hatası: %v\n", nodeID, err)
+		}
 		resp.Body.Close()
 
 		fmt.Printf("\n[%s] %d üye görülüyor:\n", nodeID, len(members))
@@ -287,12 +289,10 @@ func measureFailover(nodeID string) {
 	resp.Body.Close()
 	fmt.Println("LB çalışıyor ✓")
 
-	// Node'u öldür
+	// Node'u öldür — timer ÖNCE başlıyor (kill isteği gidiş-dönüş dahil)
 	fmt.Printf("[%s] %s öldürülüyor...\n", time.Now().Format("15:04:05.000"), nodeID)
-	killNode(nodeID)
-
-	// FIX: start timer killNode SONRASI — gossip'in fark etmesi gereken süreyi ölç
 	start := time.Now()
+	killNode(nodeID)
 	fmt.Println("Failover ölçümü başladı (gossip convergence bekleniyor)...")
 
 	const (
@@ -313,7 +313,9 @@ func measureFailover(nodeID string) {
 
 		// JSON body'den hangi node cevap verdi?
 		var result map[string]interface{}
-		json.NewDecoder(resp.Body).Decode(&result)
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			fmt.Fprintf(os.Stderr, "failover JSON decode hatası: %v\n", err)
+		}
 		resp.Body.Close()
 
 		respNode, _ := result["node"].(string)

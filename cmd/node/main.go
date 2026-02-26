@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -144,6 +145,11 @@ func main() {
 
 		// Node'u gossip'ten izole et (network partition simülasyonu)
 		// duration query param: örn. /debug/partition?duration=15s
+		// FIX: önceki timer iptal edilir — çoklu çağrı race'i önlenir
+		var (
+			partitionMu    sync.Mutex
+			partitionTimer *time.Timer
+		)
 		mux.HandleFunc("/debug/partition", func(w http.ResponseWriter, r *http.Request) {
 			dur := 15 * time.Second
 			if d := r.URL.Query().Get("duration"); d != "" {
@@ -152,9 +158,17 @@ func main() {
 				}
 			}
 			transport.SetPaused(true)
-			time.AfterFunc(dur, func() {
+
+			// Önceki timer varsa iptal et, yenisini kur
+			partitionMu.Lock()
+			if partitionTimer != nil {
+				partitionTimer.Stop()
+			}
+			partitionTimer = time.AfterFunc(dur, func() {
 				transport.SetPaused(false)
 			})
+			partitionMu.Unlock()
+
 			logger.Warn("partition aktif", "duration", dur)
 			w.Header().Set("Content-Type", "application/json")
 			fmt.Fprintf(w, `{"status":"partitioned","node":"%s","duration":"%s"}`, *nodeID, dur)

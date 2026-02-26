@@ -336,18 +336,31 @@ func (p *Protocol) handleDeadMsg(msg GossipMessage) {
 	// TargetID'nin state'ini güncelle — piggyback zaten işlendi
 	// Ama explicit DEAD mesajı için de uygula
 	deadInfo := NodeInfo{
-		ID:          msg.TargetID,
-		State:       StateDead,
-		Incarnation: 0, // En düşük — AddOrUpdate kuralıyla yoksayılabilir
+		ID:    msg.TargetID,
+		State: StateDead,
 	}
-	// Eğer mevcut bilgi varsa incarnation'ı al
 	if existing, found := p.membership.GetMember(msg.TargetID); found {
+		// Mevcut kayıt var — incarnation'ı koru
 		deadInfo.Addr = existing.Addr
 		deadInfo.ServiceAddr = existing.ServiceAddr
 		deadInfo.Incarnation = existing.Incarnation
-		deadInfo.State = StateDead
-		p.membership.AddOrUpdate(deadInfo)
+	} else {
+		// Bilinmeyen node — piggyback Members'tan addr/incarnation bul
+		for _, m := range msg.Members {
+			if m.ID == msg.TargetID {
+				deadInfo.Addr = m.Addr
+				deadInfo.ServiceAddr = m.ServiceAddr
+				deadInfo.Incarnation = m.Incarnation
+				break
+			}
+		}
+		if deadInfo.Addr == "" {
+			// Adres bilgisi yoksa ekleyemeyiz — warning logla
+			p.logger.Warn("dead msg for unknown node without addr info", "target", msg.TargetID)
+			return
+		}
 	}
+	p.membership.AddOrUpdate(deadInfo)
 }
 
 // handleSuspectMsg: gelen SUSPECT mesajını membership'e uygula.
