@@ -98,22 +98,41 @@ func (c ProtocolConfig) Validate() error {
 	if c.SuspectTimeout <= c.IndirectTimeout {
 		return fmt.Errorf("SuspectTimeout (%v) > IndirectTimeout (%v) olmalı", c.SuspectTimeout, c.IndirectTimeout)
 	}
-	if c.LifeguardEnabled {
-		if c.SelfAwarenessMax <= 0 {
-			return fmt.Errorf("Lifeguard: SelfAwarenessMax must be > 0, got %d", c.SelfAwarenessMax)
-		}
-		if c.PingTimeoutMin > c.PingTimeoutMax {
-			return fmt.Errorf("Lifeguard: PingTimeoutMin (%v) > PingTimeoutMax (%v)", c.PingTimeoutMin, c.PingTimeoutMax)
-		}
-		if c.IndirectTimeoutMin > c.IndirectTimeoutMax {
-			return fmt.Errorf("Lifeguard: IndirectTimeoutMin (%v) > IndirectTimeoutMax (%v)", c.IndirectTimeoutMin, c.IndirectTimeoutMax)
-		}
-		if c.SuspectTimeoutMin > c.SuspectTimeoutMax {
-			return fmt.Errorf("Lifeguard: SuspectTimeoutMin (%v) > SuspectTimeoutMax (%v)", c.SuspectTimeoutMin, c.SuspectTimeoutMax)
-		}
-		if c.PingTimeoutMin >= c.IndirectTimeoutMin {
-			return fmt.Errorf("Lifeguard: PingTimeoutMin (%v) must be < IndirectTimeoutMin (%v)", c.PingTimeoutMin, c.IndirectTimeoutMin)
-		}
+
+	// Lifeguard *Min/*Max bound consistency is validated unconditionally —
+	// not just when LifeguardEnabled is true. The reasoning: an inverted
+	// range (Min > Max) is never a valid configuration regardless of the
+	// master switch. Catching it now means flipping LifeguardEnabled from
+	// false to true at runtime can never surface a stale misconfiguration.
+	// Same logic applies to the cross-field ordering between Ping and
+	// Indirect timeouts.
+	if c.PingTimeoutMin > c.PingTimeoutMax {
+		return fmt.Errorf("PingTimeoutMin (%v) > PingTimeoutMax (%v) — inverted range",
+			c.PingTimeoutMin, c.PingTimeoutMax)
+	}
+	if c.IndirectTimeoutMin > c.IndirectTimeoutMax {
+		return fmt.Errorf("IndirectTimeoutMin (%v) > IndirectTimeoutMax (%v) — inverted range",
+			c.IndirectTimeoutMin, c.IndirectTimeoutMax)
+	}
+	if c.SuspectTimeoutMin > c.SuspectTimeoutMax {
+		return fmt.Errorf("SuspectTimeoutMin (%v) > SuspectTimeoutMax (%v) — inverted range",
+			c.SuspectTimeoutMin, c.SuspectTimeoutMax)
+	}
+	// Cross-field ordering is only checked when both bounds are set, so a
+	// half-configured ProtocolConfig (e.g. one constructed manually
+	// without DefaultConfig) doesn't false-positive on zero values.
+	if c.PingTimeoutMin > 0 && c.IndirectTimeoutMin > 0 &&
+		c.PingTimeoutMin >= c.IndirectTimeoutMin {
+		return fmt.Errorf("PingTimeoutMin (%v) must be < IndirectTimeoutMin (%v)",
+			c.PingTimeoutMin, c.IndirectTimeoutMin)
+	}
+
+	// SelfAwarenessMax > 0 is only meaningful when Lifeguard is enabled —
+	// the value is read solely by SelfAwareness.ScaleTimeout, which never
+	// runs unless LifeguardEnabled is true. Operators with the feature off
+	// shouldn't be forced to set this field.
+	if c.LifeguardEnabled && c.SelfAwarenessMax <= 0 {
+		return fmt.Errorf("Lifeguard: SelfAwarenessMax must be > 0, got %d", c.SelfAwarenessMax)
 	}
 	return nil
 }

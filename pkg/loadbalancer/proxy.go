@@ -33,11 +33,24 @@ import (
 // is read by latency-aware selectors (P2CEWMA). A value of 0 means "no
 // measurements yet" — selectors should treat that as missing data rather
 // than as zero latency.
+//
+// FIELD ORDER IS LOAD-BEARING. The sync/atomic package documents that
+// 64-bit atomics on 32-bit ARM/x86 require their address to be 8-byte
+// aligned, otherwise atomic.LoadInt64 / CompareAndSwapInt64 panic. Go
+// guarantees the first field of a heap-allocated struct is 8-byte
+// aligned, so by placing LatencyEWMA at offset 0 we guarantee correctness
+// across every supported GOARCH. ActiveConns (int32) is then placed
+// adjacent — being only 4-byte-aligned itself, it can sit anywhere
+// without hazard.
+//
+// Future maintainers: do NOT reorder these fields without also updating
+// TestBackend_LatencyEWMAAtOffsetZero, which pins this contract via
+// unsafe.Offsetof.
 type Backend struct {
+	LatencyEWMA int64 // atomic — EWMA response time in nanoseconds (must remain at offset 0)
+	ActiveConns int32 // atomic — concurrent HTTP request count
 	URL         *url.URL
 	NodeID      string
-	ActiveConns int32 // atomic — concurrent HTTP request sayısı
-	LatencyEWMA int64 // atomic — EWMA response time in nanoseconds
 	proxy       *httputil.ReverseProxy
 }
 
