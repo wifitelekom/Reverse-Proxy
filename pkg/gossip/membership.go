@@ -7,8 +7,9 @@ import (
 	"time"
 )
 
-// nodeEntry iç temsil — suspectTimer da burada saklanır.
-// Dışarıya asla pointer verilmez, sadece NodeInfo kopyası döner.
+// nodeEntry is the private membership-table record. Pointers to it never
+// leave this file; callers receive copies of NodeInfo so they cannot
+// mutate the table by accident.
 //
 // suspectConfirmers is the Lifeguard "Dogpile" vote set: each unique
 // confirmer ID counts as one independent suspicion. Cleared automatically
@@ -30,9 +31,9 @@ type nodeEntry struct {
 	srcAddr           string
 }
 
-// MembershipList thread-safe SWIM üyelik tablosudur.
-// Tüm okuma/yazma işlemleri RWMutex ile korunur.
-// Dışarıya SADECE snapshot (kopya) verir — caller state'i bozamaz.
+// MembershipList is the thread-safe SWIM membership table.
+// All reads and writes are guarded by an RWMutex. Callers only ever
+// receive snapshots (copies); they cannot corrupt internal state.
 type MembershipList struct {
 	mu      sync.RWMutex
 	members map[string]*nodeEntry
@@ -46,7 +47,7 @@ type MembershipList struct {
 	metrics MetricsHook
 }
 
-// NewMembershipList yeni bir MembershipList oluşturur.
+// NewMembershipList creates a new MembershipList.
 func NewMembershipList(localID string, logger *slog.Logger) *MembershipList {
 	return &MembershipList{
 		members: make(map[string]*nodeEntry),
@@ -153,13 +154,12 @@ func (ml *MembershipList) PinSourceIfAbsent(nodeID, srcAddr string) bool {
 	return true
 }
 
-// AddOrUpdate bir node'u ekler veya günceller.
-// SWIM incarnation number kuralı:
-//   - Yeni incarnation > mevcut → her zaman kabul et
-//   - Aynı incarnation → daha kötü state kabul edilir (Dead > Suspect > Alive)
-//   - Yeni incarnation < mevcut → stale bilgi, yoksay
+// AddOrUpdate adds or updates a node entry. SWIM incarnation rules:
+//   - new incarnation > existing → always accept
+//   - same incarnation → worse state wins (Dead > Suspect > Alive)
+//   - new incarnation < existing → stale, ignore
 //
-// Dönüş: true ise state değişti, false ise yoksayıldı.
+// Returns true if the entry was accepted, false if ignored.
 func (ml *MembershipList) AddOrUpdate(info NodeInfo) bool {
 	// We do all critical-section work under the lock, capture what the
 	// metrics hook needs, then notify outside the lock. Avoids any chance
@@ -185,13 +185,14 @@ func (ml *MembershipList) AddOrUpdate(info NodeInfo) bool {
 		toState = info.State.String()
 
 	case info.Incarnation < existing.info.Incarnation:
-		// Stale bilgi — yoksay.
+		// Stale — ignore.
 
 	case info.Incarnation == existing.info.Incarnation && info.State <= existing.info.State:
-		// Aynı incarnation, state aynı veya daha iyi — yoksay.
+		// Same incarnation, state equal or better — ignore.
 
 	default:
-		// Alive geliyorsa aktif suspect timer'ı iptal et + Dogpile oylarını sıfırla
+		// Alive transition: cancel any pending suspect timer and clear
+		// Dogpile votes so a future suspicion starts from scratch.
 		if info.State == StateAlive && existing.suspectCancel != nil {
 			existing.suspectCancel()
 			existing.suspectTimer = nil
@@ -223,10 +224,11 @@ func (ml *MembershipList) AddOrUpdate(info NodeInfo) bool {
 	return accepted
 }
 
-// MarkSuspect bir node'u suspect olarak işaretler.
-// suspectTimeout sonra Dead'e geçirecek timer başlatır.
-// deadCallback: node dead olduğunda çağrılır (gossip yaymak için).
-// Deadlock önlemi: callback lock dışında çağrılır.
+// MarkSuspect flips a node to Suspect and arms a timer that will
+// transition it to Dead after suspectTimeout elapses.
+// deadCallback fires once the timer expires (typically used to
+// disseminate the death via gossip). It runs OUTSIDE the lock to
+// avoid deadlocks.
 func (ml *MembershipList) MarkSuspect(
 	nodeID string,
 	suspectTimeout time.Duration,
@@ -244,7 +246,7 @@ func (ml *MembershipList) MarkSuspect(
 	entry.info.State = StateSuspect
 	ml.logger.Warn("node suspect", "id", nodeID)
 
-	// time.AfterFunc: goroutine açmadan timer — memory leak riski yok
+	// time.AfterFunc starts a timer without opening a goroutine — no memory leak risk.
 	timer := time.AfterFunc(suspectTimeout, func() {
 		ml.markDead(nodeID, deadCallback)
 	})
@@ -255,8 +257,9 @@ func (ml *MembershipList) MarkSuspect(
 	hook.OnStateChange(nodeID, prev.String(), StateSuspect.String())
 }
 
-// markDead timer callback'ten çağrılır — ayrı lock alır.
-// Deadlock önlemi: callback lock dışında çağrılır.
+// markDead is invoked by the suspect timer callback. It re-acquires
+// the lock and runs the user-supplied callback OUTSIDE the lock to
+// avoid deadlocks.
 func (ml *MembershipList) markDead(nodeID string, callback func(string)) {
 	ml.mu.Lock()
 	hook := ml.metrics
@@ -341,9 +344,10 @@ func (ml *MembershipList) ConfirmSuspect(
 	return votes, true
 }
 
-// GetAliveMembers load balancer için ALIVE node'ları döner.
-// Filtreler: StateAlive + ServiceAddr != "" (LB'nin kendisi hariç)
-// Her çağrıda kopya döner — caller state'i değiştiremez.
+// GetAliveMembers returns ALIVE nodes for the load balancer to route to.
+// Filters: StateAlive + ServiceAddr != "" (the LB itself, which has an
+// empty ServiceAddr, is excluded). Returns a fresh copy on every call
+// so the caller cannot mutate internal state.
 func (ml *MembershipList) GetAliveMembers() []NodeInfo {
 	ml.mu.RLock()
 	defer ml.mu.RUnlock()
@@ -359,8 +363,9 @@ func (ml *MembershipList) GetAliveMembers() []NodeInfo {
 	return result
 }
 
-// GetAllMembers gossip piggyback için tüm üyeleri döner.
-// Dead node'lar da dahildir — convergence için gerekli.
+// GetAllMembers returns every member for piggyback dissemination.
+// Dead nodes are included — they are needed for convergence (so other
+// nodes still hear "X is dead" via piggyback long enough to apply it).
 func (ml *MembershipList) GetAllMembers() []NodeInfo {
 	ml.mu.RLock()
 	defer ml.mu.RUnlock()
@@ -372,9 +377,9 @@ func (ml *MembershipList) GetAllMembers() []NodeInfo {
 	return result
 }
 
-// GetRandomMembers K adet rastgele üye döner.
-// Kendisi ve excludeIDs listesindekiler hariç, Dead node'lar hariç.
-// Fisher-Yates shuffle ile uniform dağılım.
+// GetRandomMembers returns up to count random members, excluding
+// the local node, anything in excludeIDs, and any Dead members.
+// Uses Fisher-Yates shuffle for a uniform distribution.
 func (ml *MembershipList) GetRandomMembers(count int, excludeIDs ...string) []NodeInfo {
 	ml.mu.RLock()
 	defer ml.mu.RUnlock()
@@ -403,8 +408,9 @@ func (ml *MembershipList) GetRandomMembers(count int, excludeIDs ...string) []No
 	return candidates[:count]
 }
 
-// Defend local node'un incarnation'ını artırır ve Alive'a çeker.
-// Başka bir node bizi suspect/dead ilan ettiğinde çağrılır.
+// Defend bumps the local node's incarnation and pulls its state back to
+// Alive. Called whenever another node has declared us suspect or dead;
+// the bumped incarnation overrides the bad gossip on subsequent rounds.
 func (ml *MembershipList) Defend(localInfo *NodeInfo) {
 	ml.mu.Lock()
 	defer ml.mu.Unlock()
@@ -422,8 +428,8 @@ func (ml *MembershipList) Defend(localInfo *NodeInfo) {
 	)
 }
 
-// GetMember belirli bir node'un bilgisini döner.
-// Bulunamazsa false döner.
+// GetMember returns the NodeInfo for a specific nodeID.
+// Returns false if no such node exists.
 func (ml *MembershipList) GetMember(nodeID string) (NodeInfo, bool) {
 	ml.mu.RLock()
 	defer ml.mu.RUnlock()

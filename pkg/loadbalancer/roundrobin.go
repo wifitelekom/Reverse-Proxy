@@ -2,23 +2,25 @@ package loadbalancer
 
 import "sync/atomic"
 
-// RoundRobin sırayla backend seçer.
-// Atomic counter ile thread-safe — mutex gerektirmez.
-// Backends getOrSyncBackends tarafından NodeID'ye göre pre-sorted gelir;
-// Select() sadece atomic index hesaplar — O(1), allocation yok.
+// RoundRobin selects backends in order. Thread-safe via an atomic
+// counter — no mutex required. The backend slice is delivered already
+// sorted by NodeID by getOrSyncBackends, so Select only computes an
+// atomic index — O(1) with no allocation.
 type RoundRobin struct {
 	counter uint64 // atomic
 }
 
-// NewRoundRobin yeni bir RoundRobin selector oluşturur.
-// counter ^uint64(0) (maxUint64) ile başlar: ilk AddUint64(1) → 0 → index 0 seçilir.
+// NewRoundRobin creates a new RoundRobin selector.
+// The counter starts at ^uint64(0) (maxUint64) so the first
+// AddUint64(1) wraps to 0, selecting index 0 on the first call.
 func NewRoundRobin() *RoundRobin {
 	return &RoundRobin{counter: ^uint64(0)}
 }
 
-// Select sıradaki backend'i döner — O(1).
-// Ön koşul: backends NodeID'ye göre sıralı olmalı (getOrSyncBackends garantisi).
-// Sıralama sorumluluğu LoadBalancer.getOrSyncBackends'ta; burada yapılmaz.
+// Select returns the next backend in round-robin order — O(1).
+// Precondition: backends must be sorted by NodeID (guaranteed by
+// LoadBalancer.getOrSyncBackends). Sorting is the load balancer's
+// responsibility, not this selector's.
 func (rr *RoundRobin) Select(backends []*Backend) *Backend {
 	if len(backends) == 0 {
 		return nil

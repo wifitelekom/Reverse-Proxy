@@ -9,25 +9,28 @@ import (
 	"time"
 )
 
-// ReceivedMessage gelen bir UDP paketini temsil eder.
+// ReceivedMessage is one UDP datagram delivered up from the transport.
 type ReceivedMessage struct {
 	From *net.UDPAddr
 	Msg  GossipMessage
 }
 
-// Transport UDP üzerinden gossip mesajları gönderir/alır.
-// Tek bir goroutine ile dinler, fan-out için buffered channel kullanır.
-// paused: true iken hem gelen hem giden UDP paketler drop edilir (gerçek partition simülasyonu).
+// Transport sends and receives gossip messages over UDP. A single
+// goroutine listens; a buffered channel fans messages out to the
+// protocol layer. When paused is true both inbound and outbound
+// packets are dropped — used for partition simulation in tests.
 type Transport struct {
 	conn   *net.UDPConn
 	recvCh chan ReceivedMessage
 	logger *slog.Logger
-	paused atomic.Bool // partition simülasyonu için
+	paused atomic.Bool // partition-simulation flag
 }
 
-// SetPaused gossip alımını ve gönderimini duraklatır/devam ettirir.
-// true: hem gelen hem giden UDP drop edilir (çift yönlü partition simülasyonu)
-// false: normal çalışma
+// SetPaused pauses or resumes both directions of the transport.
+//
+//	true  → both inbound and outbound UDP are dropped (bidirectional
+//	         partition simulation).
+//	false → normal operation.
 func (t *Transport) SetPaused(v bool) {
 	t.paused.Store(v)
 	if v {
@@ -37,8 +40,10 @@ func (t *Transport) SetPaused(v bool) {
 	}
 }
 
-// NewTransport belirtilen adreste UDP dinleyen transport oluşturur.
-// recvBuf: channel buffer boyutu (önerilen: 100)
+// NewTransport opens a UDP listener on listenAddr and returns the
+// configured transport. recvBuf is the size of the inbound channel
+// buffer (recommended: 100); a full buffer drops packets following
+// UDP semantics.
 func NewTransport(listenAddr string, recvBuf int, logger *slog.Logger) (*Transport, error) {
 	addr, err := net.ResolveUDPAddr("udp", listenAddr)
 	if err != nil {
@@ -57,18 +62,19 @@ func NewTransport(listenAddr string, recvBuf int, logger *slog.Logger) (*Transpo
 	}, nil
 }
 
-// Start context ile yönetilen receive loop'u başlatır.
-// Non-blocking: goroutine arka planda çalışır, fonksiyon hemen döner.
+// Start launches the receive loop, which exits cleanly when ctx is
+// canceled. Non-blocking: the goroutine runs in the background and
+// the function returns immediately.
 func (t *Transport) Start(ctx context.Context) {
 	go t.receiveLoop(ctx)
 }
 
-// receiveLoop sürekli UDP paketi bekler.
-// Context iptal paterni: SetReadDeadline(100ms) + ctx.Done() kontrolü.
-// Bu sayede conn.Close() race condition olmadan yapılır.
+// receiveLoop continuously reads UDP packets and pushes them to recvCh.
+// Cancellation pattern: SetReadDeadline(100ms) + ctx.Done() check
+// allows ctx-driven shutdown without racing on conn.Close().
 func (t *Transport) receiveLoop(ctx context.Context) {
 	defer close(t.recvCh)
-	buf := make([]byte, 65535) // UDP max boyutu
+	buf := make([]byte, 65535) // UDP max packet size
 
 	for {
 		select {
@@ -78,22 +84,22 @@ func (t *Transport) receiveLoop(ctx context.Context) {
 		default:
 		}
 
-		// 100ms deadline: context iptalini bloke olmadan kontrol etmek için
+		// 100ms read deadline lets us check ctx without blocking forever.
 		t.conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
 
 		n, addr, err := t.conn.ReadFromUDP(buf)
 		if err != nil {
 			if isTimeout(err) {
-				continue // Deadline timeout — context kontrolüne dön
+				continue // deadline expired — loop back to ctx check
 			}
 			if ctx.Err() != nil {
-				return // Context iptal edildi
+				return // context canceled
 			}
 			t.logger.Error("UDP read error", "err", err)
 			continue
 		}
 
-		// Partition simülasyonu: paused ise paketi drop et
+		// Partition simulation: drop the packet if paused.
 		if t.paused.Load() {
 			continue
 		}
@@ -104,7 +110,7 @@ func (t *Transport) receiveLoop(ctx context.Context) {
 			continue
 		}
 
-		// Non-blocking send — channel dolu ise drop (UDP semantics)
+		// Non-blocking send — drop if the channel is full (UDP semantics).
 		select {
 		case t.recvCh <- ReceivedMessage{From: addr, Msg: msg}:
 		default:
@@ -113,14 +119,15 @@ func (t *Transport) receiveLoop(ctx context.Context) {
 	}
 }
 
-// Send tek bir UDP datagram gönderir.
-// Thread-safe: UDPConn.WriteToUDP concurrent-safe.
-// Partition simülasyonu: paused iken gönderim sessizce drop edilir.
-// Adres normalizasyonu: ":port" → "127.0.0.1:port" (Windows UDP hedefi için).
+// Send writes one UDP datagram. Thread-safe: net.UDPConn.WriteToUDP
+// is concurrent-safe. When the transport is paused, sends are silently
+// dropped to maintain bidirectional partition semantics. Address
+// normalization: ":port" → "127.0.0.1:port" because Windows UDP
+// rejects 0.0.0.0 as a destination.
 func (t *Transport) Send(addr string, msg GossipMessage) error {
 	addr = normalizeAddr(addr)
 
-	// Partition simülasyonu: paused iken outbound da drop et (çift yönlü izolasyon)
+	// Partition simulation: drop outbound when paused (bidirectional isolation).
 	if t.paused.Load() {
 		t.logger.Debug("send dropped (partition active)", "addr", addr)
 		return nil
@@ -140,8 +147,8 @@ func (t *Transport) Send(addr string, msg GossipMessage) error {
 	return err
 }
 
-// normalizeAddr ":port" formatını "127.0.0.1:port" olarak dönüştürür.
-// Windows'ta 0.0.0.0 UDP gönderim hedefi olarak geçersizdir.
+// normalizeAddr converts ":port" to "127.0.0.1:port".
+// On Windows, 0.0.0.0 is invalid as a UDP send target.
 func normalizeAddr(addr string) string {
 	if len(addr) > 0 && addr[0] == ':' {
 		return "127.0.0.1" + addr
@@ -149,13 +156,13 @@ func normalizeAddr(addr string) string {
 	return addr
 }
 
-// Receive gelen mesajlar için channel döner.
-// Protocol loop bu channel'ı select ile dinler.
+// Receive returns the channel of incoming messages.
+// The protocol loop drains this via select.
 func (t *Transport) Receive() <-chan ReceivedMessage {
 	return t.recvCh
 }
 
-// isTimeout net.Error timeout kontrolü.
+// isTimeout reports whether err is a net.Error timeout (deadline expired).
 func isTimeout(err error) bool {
 	netErr, ok := err.(net.Error)
 	return ok && netErr.Timeout()

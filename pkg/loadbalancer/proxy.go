@@ -25,8 +25,10 @@ import (
 	"golang.org/x/time/rate"
 )
 
-// Backend bir backend node'u temsil eder — load balancer'ın görüşü.
-// Kalıcı nesne: ActiveConns, LatencyEWMA ve proxy request'ler arasında korunur.
+// Backend represents one backend node from the load balancer's perspective.
+// The struct is persistent: ActiveConns, LatencyEWMA, and the proxy
+// instance all survive across requests so connection counts and latency
+// EWMA aren't lost between calls.
 //
 // LatencyEWMA holds the exponentially-weighted moving average of recent
 // response times in nanoseconds, updated atomically by RecordLatency. It
@@ -83,7 +85,7 @@ func (b *Backend) RecordLatency(d time.Duration) {
 	}
 }
 
-// Selector load balancing stratejisinin arayüzü.
+// Selector is the interface every load-balancing strategy implements.
 // RoundRobin ve LeastConnections bu interface'i uygular.
 type Selector interface {
 	Select(backends []*Backend) *Backend
@@ -93,16 +95,16 @@ type Selector interface {
 // to a backend). Operators must avoid colliding paths in their backends.
 const adminPathPrefix = "/_lb/"
 
-// LoadBalancer gossip membership'e dayalı HTTP reverse proxy.
+// LoadBalancer is an HTTP reverse proxy backed by gossip membership.
 type LoadBalancer struct {
 	config      types.LBConfig
 	membership  *gossip.MembershipList
 	selector    Selector
 	server      *http.Server
 	logger      *slog.Logger
-	backendPool map[string]*Backend // NodeID → kalıcı Backend nesnesi
-	sortedCache []*Backend          // pre-sorted liste; membership değişince yenilenir
-	poolMu      sync.RWMutex       // backendPool + sortedCache erişim kilidi
+	backendPool map[string]*Backend // NodeID → persistent Backend instance
+	sortedCache []*Backend          // pre-sorted list; rebuilt when membership changes
+	poolMu      sync.RWMutex        // guards backendPool + sortedCache
 
 	// healthChecker is nil when health checks are disabled. The hot path
 	// checks for nil rather than calling a noop method to keep overhead
@@ -184,7 +186,7 @@ func (w *statusRecordingWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	return nil, nil, errHijackUnsupported
 }
 
-// NewLoadBalancer yeni bir LoadBalancer oluşturur.
+// NewLoadBalancer creates a new LoadBalancer.
 //
 // healthChecker may be nil — that's the "feature disabled" mode and behaves
 // exactly like the historical proxy. When non-nil, the LB filters backends
@@ -256,8 +258,8 @@ func NewLoadBalancer(
 	return lb, nil
 }
 
-// Start HTTP server'ı başlatır — blocking.
-// ctx iptal edildiğinde server graceful shutdown yapar.
+// Start launches the HTTP server — blocking.
+// The server graceful-shuts down when ctx is canceled.
 //
 // When health-checking is enabled the LB also runs a low-frequency
 // background refresh that resyncs the checker's target list from gossip
@@ -340,7 +342,7 @@ func (lb *LoadBalancer) refreshTargetsLoop(ctx context.Context) {
 	}
 }
 
-// handleRequest her gelen HTTP request'i işler.
+// handleRequest processes each incoming HTTP request.
 // Her request'te membership listesi taze okunur, backend havuzu senkronize edilir.
 func (lb *LoadBalancer) handleRequest(w http.ResponseWriter, r *http.Request) {
 	// Admin endpoints take priority over proxying. The /_lb/ prefix is
@@ -363,7 +365,7 @@ func (lb *LoadBalancer) handleRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Kalıcı backend havuzundan al — ActiveConns korunur
+	// Pull from the persistent backend pool — ActiveConns is preserved.
 	backends := lb.getOrSyncBackends(aliveNodes)
 
 	// Health filter: if a checker is attached, drop Unhealthy backends.
@@ -450,11 +452,12 @@ func (lb *LoadBalancer) handleRequest(w http.ResponseWriter, r *http.Request) {
 
 // getOrSyncBackends backend havuzunu aliveNodes ile senkronize eder.
 //
-// Hızlı yol (membership değişmedi): RLock ile cache kontrol, allocation yok → O(N).
-// Yavaş yol (membership değişti): write lock, pool rebuild, NodeID sort, cache güncelle.
-// Sort burada bir kez yapılır — Selector.Select() sıralama yapmaz (O(1) seçim).
+// Fast path (membership unchanged): RLock + cache check, zero allocation → O(N).
+// Slow path (membership changed): write lock, rebuild the pool, sort by
+// NodeID, update the cache. Sorting happens here once — Selector.Select()
+// does NOT sort, so per-call selection is O(1).
 func (lb *LoadBalancer) getOrSyncBackends(nodes []gossip.NodeInfo) []*Backend {
-	// Hızlı yol: membership değişmemişse sortedCache'i döndür (allocation yok)
+	// Fast path: if membership is unchanged, return sortedCache (no allocation).
 	lb.poolMu.RLock()
 	if lb.sameAsCache(nodes) {
 		cached := lb.sortedCache
@@ -463,11 +466,12 @@ func (lb *LoadBalancer) getOrSyncBackends(nodes []gossip.NodeInfo) []*Backend {
 	}
 	lb.poolMu.RUnlock()
 
-	// Yavaş yol: write lock, pool yeniden oluştur
+	// Slow path: take the write lock, rebuild the pool.
 	lb.poolMu.Lock()
 	defer lb.poolMu.Unlock()
 
-	// Double-check: başka goroutine aynı anda rebuild yapmış olabilir
+	// Double-check after acquiring the write lock: another goroutine
+	// may have rebuilt the cache between our RLock release and Lock.
 	if lb.sameAsCache(nodes) {
 		return lb.sortedCache
 	}
@@ -481,10 +485,10 @@ func (lb *LoadBalancer) getOrSyncBackends(nodes []gossip.NodeInfo) []*Backend {
 			newPool[node.ID] = existing
 			result = append(result, existing)
 		} else {
-			// Yeni node — bir kez oluştur
+			// New node — build the Backend once and cache it.
 			b := lb.newBackend(node)
 			if b == nil {
-				// URL parse hatası — bu node'u atla
+				// URL parse error — skip this node entirely.
 				continue
 			}
 			newPool[node.ID] = b
@@ -492,7 +496,7 @@ func (lb *LoadBalancer) getOrSyncBackends(nodes []gossip.NodeInfo) []*Backend {
 		}
 	}
 
-	// Pool yenilenince bir kez sırala — Select() artık sıralama yapmaz
+	// Sort once on pool rebuild — Select() no longer sorts on every call.
 	sort.Slice(result, func(i, j int) bool {
 		return result[i].NodeID < result[j].NodeID
 	})
@@ -596,9 +600,9 @@ func (lb *LoadBalancer) handleHealthDump(w http.ResponseWriter, r *http.Request)
 	json.NewEncoder(w).Encode(lb.healthChecker.GetAllHealth())
 }
 
-// sameAsCache mevcut alive node listesi ile pool içeriğini karşılaştırır.
-// Eşleşme varsa sortedCache geçerlidir ve membership değişmemiştir.
-// poolMu kilidi (RLock veya Lock) altında çağrılmalı.
+// sameAsCache compares the alive node list against the current pool.
+// A match means sortedCache is valid and membership is unchanged.
+// Must be called under poolMu (RLock or Lock).
 func (lb *LoadBalancer) sameAsCache(nodes []gossip.NodeInfo) bool {
 	if len(nodes) != len(lb.backendPool) {
 		return false
@@ -611,8 +615,8 @@ func (lb *LoadBalancer) sameAsCache(nodes []gossip.NodeInfo) bool {
 	return true
 }
 
-// newBackend tek bir NodeInfo için Backend nesnesi oluşturur.
-// ReverseProxy bir kez oluşturulur ve sonraki request'lerde yeniden kullanılır.
+// newBackend builds a Backend instance for a single NodeInfo.
+// The ReverseProxy is created once and reused on every subsequent request.
 //
 // Scheme selection: when backend TLS is enabled we dial backends over HTTPS,
 // otherwise plain HTTP. The TLSClientConfig (built once in NewLoadBalancer)

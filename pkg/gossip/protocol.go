@@ -11,22 +11,22 @@ import (
 	"p2p-loadbalancer/pkg/types"
 )
 
-// Protocol SWIM protokol döngüsünü yönetir.
-// 2 goroutine: gossipLoop (ping/ack döngüsü) + handleMessages (gelen mesaj işleyici)
-// Bu iki goroutine pendingPings (sync.Map) üzerinden ACK'ları koordine eder.
+// Protocol drives the SWIM protocol loop. Two goroutines coordinate via
+// pendingPings (sync.Map): gossipLoop runs ping/ack rounds and
+// handleMessages dispatches incoming messages.
 //
 // When config.LifeguardEnabled is true, Self-Awareness adjusts probe
 // timeouts dynamically and Dogpile shortens the suspect window via
 // ConfirmSuspect on MembershipList. The selfAwareness field stays nil if
 // the feature is off, so the hot path has zero overhead.
 type Protocol struct {
-	config     types.ProtocolConfig
-	membership *MembershipList
-	transport  *Transport
-	localInfo  NodeInfo
-	seqCounter uint64   // atomic artan sequence number
-	pendingPings sync.Map // map[uint64]chan bool — uçuşta PING'ler
-	logger     *slog.Logger
+	config       types.ProtocolConfig
+	membership   *MembershipList
+	transport    *Transport
+	localInfo    NodeInfo
+	seqCounter   uint64   // atomic monotonic sequence number
+	pendingPings sync.Map // map[uint64]chan bool — in-flight PINGs
+	logger       *slog.Logger
 
 	// selfAwareness is non-nil only when config.LifeguardEnabled.
 	selfAwareness *SelfAwareness
@@ -36,7 +36,7 @@ type Protocol struct {
 	metrics MetricsHook
 }
 
-// NewProtocol yeni bir SWIM protokol instance'ı oluşturur.
+// NewProtocol creates a new SWIM protocol instance.
 func NewProtocol(
 	cfg types.ProtocolConfig,
 	ml *MembershipList,
@@ -45,12 +45,12 @@ func NewProtocol(
 	logger *slog.Logger,
 ) *Protocol {
 	p := &Protocol{
-		config:    cfg,
+		config:     cfg,
 		membership: ml,
-		transport: transport,
-		localInfo: localInfo,
-		logger:    logger,
-		metrics:   noopMetricsHook{},
+		transport:  transport,
+		localInfo:  localInfo,
+		logger:     logger,
+		metrics:    noopMetricsHook{},
 	}
 	if cfg.LifeguardEnabled {
 		p.selfAwareness = NewSelfAwareness(cfg.SelfAwarenessMax)
@@ -99,15 +99,15 @@ func (p *Protocol) computeSuspectTimeout(votes int) time.Duration {
 	)
 }
 
-// Start iki goroutine başlatır — non-blocking.
-// ctx iptal edildiğinde her iki goroutine da temiz çıkar.
+// Start launches the two protocol goroutines — non-blocking.
+// Both goroutines exit cleanly when ctx is canceled.
 func (p *Protocol) Start(ctx context.Context) {
 	go p.gossipLoop(ctx)
 	go p.handleMessages(ctx)
 }
 
-// gossipLoop T_protocol aralığında çalışan ana döngü.
-// Her tick'te bir gossip round çalıştırır.
+// gossipLoop is the main loop, ticking once per ProtocolInterval.
+// Each tick runs one gossip round.
 func (p *Protocol) gossipLoop(ctx context.Context) {
 	ticker := time.NewTicker(p.config.ProtocolInterval)
 	defer ticker.Stop()
@@ -127,17 +127,17 @@ func (p *Protocol) gossipLoop(ctx context.Context) {
 	}
 }
 
-// runProtocolRound tek bir SWIM protokol round'unu yürütür.
-// Direct ping → timeout → indirect ping → timeout → suspect
+// runProtocolRound executes one SWIM round.
+// Direct ping → timeout → indirect ping → timeout → suspect.
 func (p *Protocol) runProtocolRound(ctx context.Context) {
 	targets := p.membership.GetRandomMembers(1)
 	if len(targets) == 0 {
-		return // Ağda başka üye yok
+		return // no other members to probe
 	}
 	target := targets[0]
 	seqNum := p.nextSeq()
 
-	// ACK kanalı: buffer=1, en fazla 1 ACK bekliyoruz
+	// ACK channel: buffer=1; we expect at most one ACK.
 	replyCh := make(chan bool, 1)
 	p.pendingPings.Store(seqNum, replyCh)
 
@@ -156,7 +156,7 @@ func (p *Protocol) runProtocolRound(ctx context.Context) {
 	}
 	p.metrics.OnMessageSent(string(MsgPing))
 
-	// Adım 1: T_ping timeout ile direkt ACK bekle
+	// Step 1: wait for direct ACK with the ping timeout.
 	// Self-Awareness scaling: under stress this can grow up to PingTimeoutMax.
 	directTimer := time.NewTimer(p.pingTimeout())
 	defer directTimer.Stop()
@@ -174,7 +174,7 @@ func (p *Protocol) runProtocolRound(ctx context.Context) {
 		p.logger.Debug("direct ACK received", "target", target.ID)
 		return
 	case <-directTimer.C:
-		// Direct ping timeout — indirect'e geç
+		// Direct ping timeout — fall through to indirect.
 		// Lifeguard: missed direct ACK is the signal that drives noop up.
 		if p.selfAwareness != nil {
 			p.selfAwareness.RecordFailure()
@@ -182,7 +182,7 @@ func (p *Protocol) runProtocolRound(ctx context.Context) {
 	}
 	p.pendingPings.Delete(seqNum)
 
-	// Adım 2: K adet araca PING_REQ gönder
+	// Step 2: send PING_REQ to K intermediaries.
 	intermediaries := p.membership.GetRandomMembers(p.config.IndirectNodes, target.ID)
 	if len(intermediaries) == 0 {
 		p.suspectNode(target.ID)
@@ -190,7 +190,7 @@ func (p *Protocol) runProtocolRound(ctx context.Context) {
 	}
 
 	indirectSeq := p.nextSeq()
-	// buffer = K: her aracı bir kez cevap verebilir
+	// buffer = K: each intermediary may reply once.
 	indirectCh := make(chan bool, len(intermediaries))
 	p.pendingPings.Store(indirectSeq, indirectCh)
 
@@ -208,7 +208,7 @@ func (p *Protocol) runProtocolRound(ctx context.Context) {
 		p.metrics.OnMessageSent(string(MsgPingReq))
 	}
 
-	// Adım 3: T_indirect timeout ile dolaylı ACK bekle
+	// Step 3: wait for indirect ACK with the indirect timeout.
 	indirectTimer := time.NewTimer(p.indirectTimeout())
 	defer indirectTimer.Stop()
 
@@ -221,14 +221,14 @@ func (p *Protocol) runProtocolRound(ctx context.Context) {
 		p.logger.Debug("indirect ACK received", "target", target.ID)
 		return
 	case <-indirectTimer.C:
-		// Indirect ping de timeout — suspect yap
+		// Indirect ping also timed out — mark suspect.
 	}
 	p.pendingPings.Delete(indirectSeq)
 
 	p.suspectNode(target.ID)
 }
 
-// suspectNode bir node'u suspect ilan eder ve gossip yayar.
+// suspectNode declares a node suspect and disseminates the news.
 //
 // Lifeguard path (LifeguardEnabled=true):
 //   - Records the local node as the first independent confirmer via
@@ -247,7 +247,7 @@ func (p *Protocol) suspectNode(nodeID string) {
 		p.membership.MarkSuspect(
 			nodeID,
 			p.config.SuspectTimeout,
-			p.gossipDead, // timer dolduğunda çağrılır
+			p.gossipDead, // invoked when the timer expires
 		)
 	}
 
@@ -273,8 +273,8 @@ func (p *Protocol) suspectNode(nodeID string) {
 	p.broadcastToK(suspectMsg)
 }
 
-// gossipDead bir node dead olduğunda tüm komşulara yayar.
-// MembershipList timer callback'inden çağrılır.
+// gossipDead disseminates a death notice to K random neighbours.
+// Invoked from MembershipList's suspect-timer callback.
 func (p *Protocol) gossipDead(nodeID string) {
 	deadMsg := GossipMessage{
 		Type:     MsgDead,
@@ -286,7 +286,7 @@ func (p *Protocol) gossipDead(nodeID string) {
 	p.broadcastToK(deadMsg)
 }
 
-// broadcastToK rastgele K üyeye mesaj gönderir (gossip fan-out).
+// broadcastToK sends msg to K random members (gossip fan-out).
 func (p *Protocol) broadcastToK(msg GossipMessage) {
 	targets := p.membership.GetRandomMembers(p.config.IndirectNodes)
 	for _, t := range targets {
@@ -298,7 +298,8 @@ func (p *Protocol) broadcastToK(msg GossipMessage) {
 	}
 }
 
-// handleMessages transport'tan gelen mesajları işler — ayrı goroutine.
+// handleMessages consumes incoming messages from the transport — runs
+// in its own goroutine.
 func (p *Protocol) handleMessages(ctx context.Context) {
 	recvCh := p.transport.Receive()
 
@@ -308,15 +309,15 @@ func (p *Protocol) handleMessages(ctx context.Context) {
 			return
 		case received, ok := <-recvCh:
 			if !ok {
-				return // channel kapatıldı
+				return // channel closed
 			}
 			p.processMessage(ctx, received)
 		}
 	}
 }
 
-// processMessage gelen mesaj türüne göre dispatch eder.
-// Piggyback üyelik bilgisi her mesajda önce işlenir.
+// processMessage dispatches by message type.
+// Piggyback membership data is processed first on every message.
 //
 // ctx is propagated to handlers that spawn long-lived goroutines (notably
 // handlePingReq). Without it, those goroutines would survive a protocol
@@ -360,10 +361,11 @@ func (p *Protocol) processMessage(ctx context.Context, received ReceivedMessage)
 		}
 	}
 
-	// Piggyback üyelik bilgisini işle
+	// Process piggyback membership entries first so the rest of the
+	// dispatch sees the freshest view.
 	for _, memberInfo := range msg.Members {
 		if memberInfo.ID == p.localInfo.ID {
-			// Kendimiz hakkında kötü gossip → incarnation++ ile savun
+			// Bad gossip about ourselves → bump incarnation to defend.
 			if memberInfo.State > StateAlive {
 				p.membership.Defend(&p.localInfo)
 				p.announceAlive()
@@ -393,11 +395,11 @@ func (p *Protocol) processMessage(ctx context.Context, received ReceivedMessage)
 	case MsgSuspect:
 		p.handleSuspectMsg(msg)
 	case MsgAlive:
-		// Piggyback zaten işlendi
+		// piggyback already processed
 	}
 }
 
-// handlePing PING'e ACK döner, kendi membership listesini piggyback eder.
+// handlePing replies to a PING with an ACK, piggybacking our membership view.
 func (p *Protocol) handlePing(from *net.UDPAddr, msg GossipMessage) {
 	ack := GossipMessage{
 		Type:     MsgAck,
@@ -413,11 +415,11 @@ func (p *Protocol) handlePing(from *net.UDPAddr, msg GossipMessage) {
 	p.metrics.OnMessageSent(string(MsgAck))
 }
 
-// handleAck bekleyen PING için channel'a bildirim gönderir.
+// handleAck signals the matching pending PING via its reply channel.
 func (p *Protocol) handleAck(msg GossipMessage) {
 	if ch, loaded := p.pendingPings.LoadAndDelete(msg.SeqNum); loaded {
 		replyCh := ch.(chan bool)
-		// Non-blocking send — zaten timeout olmuş olabilir
+		// Non-blocking send — the request may have already timed out.
 		select {
 		case replyCh <- true:
 		default:
@@ -425,8 +427,9 @@ func (p *Protocol) handleAck(msg GossipMessage) {
 	}
 }
 
-// handlePingReq: aracı olarak hedef node'a ping at, sonucu requester'a ilet.
-// Ayrı goroutine'da çalışır — blocking ping içerir.
+// handlePingReq runs as an intermediary: pings the target on behalf of the
+// requester and forwards the result. Spawns its own goroutine because the
+// blocking ping must not stall the message-receive loop.
 //
 // The spawned goroutine waits up to IndirectTimeout (or its scaled
 // Lifeguard equivalent — up to 8s by default) for the target's ACK.
@@ -440,19 +443,19 @@ func (p *Protocol) handleAck(msg GossipMessage) {
 // IndirectTimeout configuration.
 func (p *Protocol) handlePingReq(ctx context.Context, msg GossipMessage) {
 	go func() {
-		// Hedef node adresini bul
+		// Look up the target's address.
 		target, found := p.membership.GetMember(msg.TargetID)
 		if !found {
 			return
 		}
 
-		// Requester adresini bul
+		// Look up the requester's address.
 		requester, found := p.membership.GetMember(msg.SenderID)
 		if !found {
 			return
 		}
 
-		// Hedef için ping at
+		// Send a probe to the target on behalf of the requester.
 		indirectSeq := p.nextSeq()
 		replyCh := make(chan bool, 1)
 		p.pendingPings.Store(indirectSeq, replyCh)
@@ -468,7 +471,7 @@ func (p *Protocol) handlePingReq(ctx context.Context, msg GossipMessage) {
 			return
 		}
 
-		// T_indirect timeout bekle, OR ctx iptal edilirse erken çık.
+		// Wait for IndirectTimeout, or bail out early on ctx cancel.
 		timer := time.NewTimer(p.config.IndirectTimeout)
 		defer timer.Stop()
 
@@ -478,41 +481,43 @@ func (p *Protocol) handlePingReq(ctx context.Context, msg GossipMessage) {
 			// forward is correct: the requester is being torn down too.
 			return
 		case <-replyCh:
-			// Hedef cevap verdi — requester'a ACK ilet
+			// Target replied — forward an ACK to the requester.
 			ackMsg := GossipMessage{
 				Type:     MsgAck,
 				SenderID: p.localInfo.ID,
 				TargetID: msg.SenderID,
-				SeqNum:   msg.SeqNum, // orijinal seq num
+				SeqNum:   msg.SeqNum, // original seq num
 			}
 			p.transport.Send(requester.Addr, ackMsg)
 		case <-timer.C:
-			// Hedef cevap vermedi — sessiz kal (requester kendi timeout'unu bekler)
+			// Target didn't reply — stay silent; the requester runs
+			// its own timeout.
 		}
 	}()
 }
 
-// handleDeadMsg: gelen DEAD mesajını membership'e uygula.
+// handleDeadMsg applies an incoming DEAD message to the membership table.
 func (p *Protocol) handleDeadMsg(msg GossipMessage) {
 	if msg.TargetID == p.localInfo.ID {
-		// Bizi dead ilan ettiler — savun
+		// They declared us dead — defend ourselves.
 		p.membership.Defend(&p.localInfo)
 		p.announceAlive()
 		return
 	}
-	// TargetID'nin state'ini güncelle — piggyback zaten işlendi
-	// Ama explicit DEAD mesajı için de uygula
+	// Apply the DEAD state for TargetID. Piggyback handling above already
+	// ran, but the explicit DEAD message gets its own application path
+	// to ensure the transition lands even when the piggyback was stale.
 	deadInfo := NodeInfo{
 		ID:    msg.TargetID,
 		State: StateDead,
 	}
 	if existing, found := p.membership.GetMember(msg.TargetID); found {
-		// Mevcut kayıt var — incarnation'ı koru
+		// Existing record — preserve its incarnation.
 		deadInfo.Addr = existing.Addr
 		deadInfo.ServiceAddr = existing.ServiceAddr
 		deadInfo.Incarnation = existing.Incarnation
 	} else {
-		// Bilinmeyen node — piggyback Members'tan addr/incarnation bul
+		// Unknown node — pull addr/incarnation from the piggyback Members.
 		for _, m := range msg.Members {
 			if m.ID == msg.TargetID {
 				deadInfo.Addr = m.Addr
@@ -522,7 +527,7 @@ func (p *Protocol) handleDeadMsg(msg GossipMessage) {
 			}
 		}
 		if deadInfo.Addr == "" {
-			// Adres bilgisi yoksa ekleyemeyiz — warning logla
+			// No address info anywhere — log a warning and bail.
 			p.logger.Warn("dead msg for unknown node without addr info", "target", msg.TargetID)
 			return
 		}
@@ -530,7 +535,7 @@ func (p *Protocol) handleDeadMsg(msg GossipMessage) {
 	p.membership.AddOrUpdate(deadInfo)
 }
 
-// handleSuspectMsg: gelen SUSPECT mesajını membership'e uygula.
+// handleSuspectMsg applies an incoming SUSPECT message to the membership table.
 //
 // Lifeguard: each unique sender counts as an independent Dogpile vote, so
 // the suspect timer shrinks logarithmically as more nodes corroborate.
@@ -538,7 +543,7 @@ func (p *Protocol) handleDeadMsg(msg GossipMessage) {
 // how many SUSPECT messages we receive.
 func (p *Protocol) handleSuspectMsg(msg GossipMessage) {
 	if msg.TargetID == p.localInfo.ID {
-		// Bizi suspect ilan ettiler — savun
+		// They declared us suspect — defend ourselves.
 		p.membership.Defend(&p.localInfo)
 		p.announceAlive()
 		return
@@ -560,7 +565,7 @@ func (p *Protocol) handleSuspectMsg(msg GossipMessage) {
 	p.membership.MarkSuspect(msg.TargetID, p.config.SuspectTimeout, p.gossipDead)
 }
 
-// announceAlive kendimizin ALIVE olduğunu gossip ile yayar.
+// announceAlive broadcasts our own ALIVE status to the gossip ring.
 func (p *Protocol) announceAlive() {
 	aliveMsg := GossipMessage{
 		Type:     MsgAlive,
@@ -571,7 +576,7 @@ func (p *Protocol) announceAlive() {
 	p.broadcastToK(aliveMsg)
 }
 
-// nextSeq thread-safe sequence number üretir.
+// nextSeq generates a thread-safe monotonic sequence number.
 func (p *Protocol) nextSeq() uint64 {
 	return atomic.AddUint64(&p.seqCounter, 1)
 }

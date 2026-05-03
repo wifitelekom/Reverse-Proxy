@@ -22,79 +22,79 @@ func aliveNode(id, addr string, incarnation uint64) NodeInfo {
 	}
 }
 
-// TestAddOrUpdate_NewNode: yeni node eklenmeli
+// TestAddOrUpdate_NewNode: a brand-new node must be accepted.
 func TestAddOrUpdate_NewNode(t *testing.T) {
 	ml := newTestML("self")
 	updated := ml.AddOrUpdate(aliveNode("node-b", ":9002", 1))
 	if !updated {
-		t.Fatal("yeni node eklenirken true dönmeli")
+		t.Fatal("AddOrUpdate must return true for a brand-new node")
 	}
 	members := ml.GetAliveMembers()
 	if len(members) != 1 || members[0].ID != "node-b" {
-		t.Fatalf("beklenen 1 üye, alınan: %v", members)
+		t.Fatalf("expected exactly node-b in alive set, got: %v", members)
 	}
 }
 
-// TestAddOrUpdate_StaleIgnored: düşük incarnation yoksayılmalı
+// TestAddOrUpdate_StaleIgnored: lower incarnation must be ignored.
 func TestAddOrUpdate_StaleIgnored(t *testing.T) {
 	ml := newTestML("self")
 	ml.AddOrUpdate(aliveNode("node-b", ":9002", 5))
 
-	// Daha düşük incarnation → yoksay
+	// Lower incarnation → ignore.
 	updated := ml.AddOrUpdate(aliveNode("node-b", ":9002", 3))
 	if updated {
-		t.Fatal("stale bilgi (düşük incarnation) kabul edilmemeli")
+		t.Fatal("stale info (lower incarnation) must not be accepted")
 	}
 
-	// Incarnation 5 hâlâ korunmuş olmalı
+	// Incarnation 5 must still be intact.
 	info, found := ml.GetMember("node-b")
 	if !found || info.Incarnation != 5 {
-		t.Fatalf("incarnation korunmadı, beklenen 5 alınan %v", info.Incarnation)
+		t.Fatalf("incarnation lost: expected 5, got %v", info.Incarnation)
 	}
 }
 
-// TestAddOrUpdate_WorseStateWins: aynı incarnation'da Dead > Alive
+// TestAddOrUpdate_WorseStateWins: at the same incarnation, Dead > Alive.
 func TestAddOrUpdate_WorseStateWins(t *testing.T) {
 	ml := newTestML("self")
 	ml.AddOrUpdate(aliveNode("node-b", ":9002", 1))
 
-	// Aynı incarnation, daha kötü state → kabul et
+	// Same incarnation, worse state → accept.
 	dead := NodeInfo{ID: "node-b", Addr: ":9002", ServiceAddr: ":9002", State: StateDead, Incarnation: 1}
 	updated := ml.AddOrUpdate(dead)
 	if !updated {
-		t.Fatal("aynı incarnation'da Dead > Alive olmalı")
+		t.Fatal("Dead must beat Alive at the same incarnation")
 	}
 
-	// GetAliveMembers'ta görünmemeli
+	// Dead must NOT show up in GetAliveMembers.
 	alive := ml.GetAliveMembers()
 	for _, m := range alive {
 		if m.ID == "node-b" {
-			t.Fatal("dead node alive listesinde görünmemeli")
+			t.Fatal("dead node leaked into the alive set")
 		}
 	}
 }
 
-// TestAddOrUpdate_HigherIncarnationAlwaysWins: yüksek incarnation her zaman kazanır
+// TestAddOrUpdate_HigherIncarnationAlwaysWins: higher incarnation beats any state.
 func TestAddOrUpdate_HigherIncarnationAlwaysWins(t *testing.T) {
 	ml := newTestML("self")
 
-	// Dead olarak ekle
+	// Insert as Dead.
 	dead := NodeInfo{ID: "node-b", Addr: ":9002", ServiceAddr: ":9002", State: StateDead, Incarnation: 3}
 	ml.AddOrUpdate(dead)
 
-	// Daha yüksek incarnation ile Alive → kabul et
+	// Higher incarnation with Alive → accept.
 	updated := ml.AddOrUpdate(aliveNode("node-b", ":9002", 5))
 	if !updated {
-		t.Fatal("daha yüksek incarnation ile Alive kabul edilmeli")
+		t.Fatal("Alive at higher incarnation must be accepted")
 	}
 
 	alive := ml.GetAliveMembers()
 	if len(alive) != 1 {
-		t.Fatalf("node-b alive listesinde olmalı, alınan: %v", alive)
+		t.Fatalf("node-b should appear in alive set, got: %v", alive)
 	}
 }
 
-// TestMarkSuspect_BecomesDeadAfterTimeout: suspect timer → dead callback
+// TestMarkSuspect_BecomesDeadAfterTimeout: suspect timer fires the dead callback.
 func TestMarkSuspect_BecomesDeadAfterTimeout(t *testing.T) {
 	ml := newTestML("self")
 	ml.AddOrUpdate(aliveNode("node-b", ":9002", 1))
@@ -104,30 +104,31 @@ func TestMarkSuspect_BecomesDeadAfterTimeout(t *testing.T) {
 		deadCalled <- id
 	})
 
-	// Suspect state kontrol
+	// State must transition to Suspect immediately.
 	info, _ := ml.GetMember("node-b")
 	if info.State != StateSuspect {
-		t.Fatalf("beklenen StateSuspect, alınan %v", info.State)
+		t.Fatalf("expected StateSuspect, got %v", info.State)
 	}
 
-	// Dead callback 50ms sonra gelmeli
+	// The dead callback must fire after the timeout elapses.
 	select {
 	case id := <-deadCalled:
 		if id != "node-b" {
-			t.Fatalf("beklenen 'node-b', alınan '%s'", id)
+			t.Fatalf("expected 'node-b', got '%s'", id)
 		}
 	case <-time.After(500 * time.Millisecond):
-		t.Fatal("dead callback zamanında gelmedi")
+		t.Fatal("dead callback did not fire within budget")
 	}
 
-	// Dead state kontrol
+	// State must be Dead now.
 	info, _ = ml.GetMember("node-b")
 	if info.State != StateDead {
-		t.Fatalf("beklenen StateDead, alınan %v", info.State)
+		t.Fatalf("expected StateDead, got %v", info.State)
 	}
 }
 
-// TestMarkSuspect_AliveBeforeTimeout: alive gelince suspect timer iptal edilmeli
+// TestMarkSuspect_AliveBeforeTimeout: an Alive update before the timer fires
+// must cancel the suspect timer.
 func TestMarkSuspect_AliveBeforeTimeout(t *testing.T) {
 	ml := newTestML("self")
 	ml.AddOrUpdate(aliveNode("node-b", ":9002", 1))
@@ -137,24 +138,25 @@ func TestMarkSuspect_AliveBeforeTimeout(t *testing.T) {
 		deadCalled <- id
 	})
 
-	// Suspect zamanlamadan önce daha yüksek incarnation ile Alive gönder
+	// Send an Alive update with a higher incarnation before the timer expires.
 	ml.AddOrUpdate(aliveNode("node-b", ":9002", 2))
 
-	// Timer iptal edilmiş olmalı — dead callback gelmemeli
+	// Timer must have been canceled — no dead callback should fire.
 	select {
 	case id := <-deadCalled:
-		t.Fatalf("dead callback gelmemeli, geldi: %s", id)
+		t.Fatalf("dead callback should not have fired, but did for: %s", id)
 	case <-time.After(400 * time.Millisecond):
-		// Beklenen: callback yok ✓
+		// expected: silence ✓
 	}
 
 	info, _ := ml.GetMember("node-b")
 	if info.State != StateAlive {
-		t.Fatalf("beklenen StateAlive, alınan %v", info.State)
+		t.Fatalf("expected StateAlive, got %v", info.State)
 	}
 }
 
-// TestDefend_IncrementsIncarnation: incarnation++ + StateAlive
+// TestDefend_IncrementsIncarnation: Defend must bump incarnation and
+// flip state to Alive on both the table entry and the caller's pointer.
 func TestDefend_IncrementsIncarnation(t *testing.T) {
 	ml := newTestML("self")
 	local := aliveNode("self", ":9001", 3)
@@ -164,34 +166,35 @@ func TestDefend_IncrementsIncarnation(t *testing.T) {
 
 	info, _ := ml.GetMember("self")
 	if info.Incarnation != 4 {
-		t.Fatalf("beklenen incarnation 4, alınan %v", info.Incarnation)
+		t.Fatalf("expected incarnation 4, got %v", info.Incarnation)
 	}
 	if info.State != StateAlive {
-		t.Fatalf("defend sonrası StateAlive bekleniyor")
+		t.Fatalf("expected StateAlive after Defend")
 	}
 	if local.Incarnation != 4 {
-		t.Fatalf("localInfo pointer güncellenmeli: beklenen 4, alınan %v", local.Incarnation)
+		t.Fatalf("caller's pointer not updated: expected 4, got %v", local.Incarnation)
 	}
 }
 
-// TestGetAliveMembers_ExcludesLB: ServiceAddr="" olanlar (LB) filtrelenmeli
+// TestGetAliveMembers_ExcludesLB: nodes with empty ServiceAddr (the LB
+// itself) must be filtered out of the alive set.
 func TestGetAliveMembers_ExcludesLB(t *testing.T) {
 	ml := newTestML("lb")
 
-	// LB kendisi — ServiceAddr boş
+	// The LB itself — empty ServiceAddr.
 	lb := NodeInfo{ID: "lb", Addr: ":9000", ServiceAddr: "", State: StateAlive, Incarnation: 1}
 	ml.AddOrUpdate(lb)
 
-	// Backend node
+	// A backend node.
 	ml.AddOrUpdate(aliveNode("node-a", ":9001", 1))
 
 	alive := ml.GetAliveMembers()
 	if len(alive) != 1 || alive[0].ID != "node-a" {
-		t.Fatalf("LB filtrelenmeli, sadece node-a görünmeli. Alınan: %v", alive)
+		t.Fatalf("LB should be filtered out; expected only node-a, got: %v", alive)
 	}
 }
 
-// TestGetAliveMembers_ExcludesSelf: localID hariç tutulmalı
+// TestGetAliveMembers_ExcludesSelf: localID must be excluded from results.
 func TestGetAliveMembers_ExcludesSelf(t *testing.T) {
 	ml := newTestML("node-a")
 	ml.AddOrUpdate(aliveNode("node-a", ":9001", 1))
@@ -200,25 +203,25 @@ func TestGetAliveMembers_ExcludesSelf(t *testing.T) {
 	alive := ml.GetAliveMembers()
 	for _, m := range alive {
 		if m.ID == "node-a" {
-			t.Fatal("localID (node-a) alive listesinde olmamalı")
+			t.Fatal("localID (node-a) leaked into the alive set")
 		}
 	}
 	if len(alive) != 1 || alive[0].ID != "node-b" {
-		t.Fatalf("sadece node-b bekleniyor, alınan: %v", alive)
+		t.Fatalf("expected only node-b, got: %v", alive)
 	}
 }
 
-// TestGetRandomMembers_ExcludesGiven: excludeIDs'dekiler hariç tutulmalı
+// TestGetRandomMembers_ExcludesGiven: nodes in excludeIDs must be skipped.
 func TestGetRandomMembers_ExcludesGiven(t *testing.T) {
 	ml := newTestML("self")
 	ml.AddOrUpdate(aliveNode("node-a", ":9001", 1))
 	ml.AddOrUpdate(aliveNode("node-b", ":9002", 1))
 	ml.AddOrUpdate(aliveNode("node-c", ":9003", 1))
 
-	members := ml.GetRandomMembers(10, "node-b") // node-b hariç
+	members := ml.GetRandomMembers(10, "node-b") // exclude node-b
 	for _, m := range members {
 		if m.ID == "node-b" || m.ID == "self" {
-			t.Fatalf("exclude listesindeki ID döndürülmemeli: %s", m.ID)
+			t.Fatalf("excluded ID returned: %s", m.ID)
 		}
 	}
 }

@@ -2,18 +2,19 @@ package loadbalancer
 
 import "sync/atomic"
 
-// LeastConnections en az aktif bağlantıya sahip backend'i seçer.
-// Stateless: backend listesini saklamaz, her Select çağrısında iterate eder.
+// LeastConnections selects the backend with the fewest active connections.
+// Stateless: it doesn't cache the backend list, it iterates on every Select.
 type LeastConnections struct{}
 
-// NewLeastConnections yeni bir LeastConnections selector oluşturur.
+// NewLeastConnections creates a new LeastConnections selector.
 func NewLeastConnections() *LeastConnections {
 	return &LeastConnections{}
 }
 
-// Select en az ActiveConns'lu backend'i döner.
-// O(N) scan — N küçük (4-10 node) için kabul edilebilir.
-// atomic.LoadInt32 ile thread-safe okuma.
+// Select returns the backend with the lowest ActiveConns count.
+// O(N) scan — acceptable for small N (4–10 nodes), which is the
+// typical fleet size this load balancer targets.
+// atomic.LoadInt32 keeps the per-backend read race-free.
 func (lc *LeastConnections) Select(backends []*Backend) *Backend {
 	if len(backends) == 0 {
 		return nil

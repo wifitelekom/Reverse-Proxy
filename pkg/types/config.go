@@ -5,8 +5,8 @@ import (
 	"time"
 )
 
-// ProtocolConfig SWIM protokol parametrelerini tutar.
-// Tüm timing değerleri buradan merkezi olarak kontrol edilir.
+// ProtocolConfig holds the SWIM protocol parameters.
+// All timing values are controlled centrally from here.
 //
 // Lifeguard extensions (HashiCorp's production-hardening of SWIM, see
 // arXiv 1707.00788) are gated behind LifeguardEnabled. When enabled:
@@ -17,18 +17,18 @@ import (
 // When LifeguardEnabled is false the protocol behaves exactly like vanilla
 // SWIM (the historical default), so existing tests remain valid.
 type ProtocolConfig struct {
-	ProtocolInterval time.Duration // T_protocol: gossip döngü aralığı
-	PingTimeout      time.Duration // T_ping: direkt ping timeout
-	IndirectTimeout  time.Duration // T_indirect: dolaylı ping timeout
-	SuspectTimeout   time.Duration // T_suspect: suspect → dead geçiş süresi
+	ProtocolInterval time.Duration // T_protocol: gossip loop interval
+	PingTimeout      time.Duration // T_ping: direct ping timeout
+	IndirectTimeout  time.Duration // T_indirect: indirect ping timeout
+	SuspectTimeout   time.Duration // T_suspect: suspect → dead transition window
 
-	IndirectNodes int // K: dolaylı ping için kullanılan aracı sayısı
+	IndirectNodes int // K: number of intermediaries used for indirect probing
 
-	GossipAddr  string // Bu node'un UDP gossip adresi (örn: ":9001")
-	ServiceAddr string // Bu node'un HTTP servis adresi (örn: ":8001")
-	NodeID      string // Benzersiz node kimliği
+	GossipAddr  string // this node's UDP gossip address (e.g. ":9001")
+	ServiceAddr string // this node's HTTP service address (e.g. ":8001")
+	NodeID      string // unique node identifier
 
-	SeedNodes []string // Bootstrap seed node'ları (gossip UDP adresleri)
+	SeedNodes []string // bootstrap seed nodes (gossip UDP addresses)
 
 	// Lifeguard extensions — opt-in. When false, the protocol behaves
 	// identically to vanilla SWIM and the *Min/*Max bounds are ignored.
@@ -56,7 +56,7 @@ type ProtocolConfig struct {
 	SuspectTimeoutMax time.Duration
 }
 
-// DefaultConfig üretim ortamı için varsayılan SWIM parametrelerini döner.
+// DefaultConfig returns the production-ready default SWIM parameters.
 // Lifeguard is OFF by default so the protocol stays bit-for-bit identical
 // to its previous behaviour. Operators opt in via LifeguardEnabled=true.
 func DefaultConfig() ProtocolConfig {
@@ -80,23 +80,23 @@ func DefaultConfig() ProtocolConfig {
 	}
 }
 
-// Validate konfigürasyon tutarsızlıklarını erken yakalar.
-// Servis başlamadan önce çağrılmalı.
+// Validate catches configuration inconsistencies early.
+// Must be called before the service starts.
 func (c ProtocolConfig) Validate() error {
 	if c.NodeID == "" {
-		return fmt.Errorf("NodeID boş olamaz")
+		return fmt.Errorf("NodeID must not be empty")
 	}
 	if c.GossipAddr == "" {
-		return fmt.Errorf("GossipAddr boş olamaz")
+		return fmt.Errorf("GossipAddr must not be empty")
 	}
 	if c.IndirectNodes <= 0 {
-		return fmt.Errorf("IndirectNodes > 0 olmalı, alınan: %d", c.IndirectNodes)
+		return fmt.Errorf("IndirectNodes must be > 0, got %d", c.IndirectNodes)
 	}
 	if c.PingTimeout >= c.IndirectTimeout {
-		return fmt.Errorf("PingTimeout (%v) < IndirectTimeout (%v) olmalı", c.PingTimeout, c.IndirectTimeout)
+		return fmt.Errorf("PingTimeout (%v) must be < IndirectTimeout (%v)", c.PingTimeout, c.IndirectTimeout)
 	}
 	if c.SuspectTimeout <= c.IndirectTimeout {
-		return fmt.Errorf("SuspectTimeout (%v) > IndirectTimeout (%v) olmalı", c.SuspectTimeout, c.IndirectTimeout)
+		return fmt.Errorf("SuspectTimeout (%v) must be > IndirectTimeout (%v)", c.SuspectTimeout, c.IndirectTimeout)
 	}
 
 	// Lifeguard *Min/*Max bound consistency is validated unconditionally —
@@ -192,7 +192,7 @@ type HealthCheckConfig struct {
 	DegradedLatency    time.Duration // 2xx above this counts as Degraded
 }
 
-// LBConfig load balancer yapılandırmasını tutar.
+// LBConfig holds the load balancer configuration.
 //
 // ShutdownTimeout bounds graceful shutdown when the parent context is
 // canceled. The previous hardcoded 5s was actively unsafe alongside the
@@ -202,10 +202,10 @@ type HealthCheckConfig struct {
 // enough for most streaming workloads but not infinite — operators
 // should tune based on their typical request lifetime. Must be > 0.
 type LBConfig struct {
-	ListenAddr      string // LB'nin HTTP dinleme adresi (örn: ":8080")
+	ListenAddr      string // LB's HTTP listen address (e.g. ":8080")
 	Strategy        string // "roundrobin" | "leastconn" | "p2c" | "p2c-ewma"
-	GossipAddr      string // LB'nin UDP gossip adresi (örn: ":9000")
-	NodeID          string // LB'nin gossip node ID'si
+	GossipAddr      string // LB's UDP gossip address (e.g. ":9000")
+	NodeID          string // LB's gossip node ID
 	SeedNodes       []string
 	ShutdownTimeout time.Duration // graceful shutdown budget; default 30s
 	Protocol        ProtocolConfig
