@@ -61,6 +61,7 @@ func TestNew_AllCollectorsExposed(t *testing.T) {
 	m := New()
 	m.RequestsTotal.WithLabelValues("b", "2xx", "GET").Inc()
 	m.RequestDuration.WithLabelValues("b", "2xx").Observe(0.01)
+	m.RequestsDropped.WithLabelValues("no_alive_backends").Inc()
 	m.WebsocketTotal.WithLabelValues("b").Inc()
 	m.BackendPoolSize.Set(0)
 	m.SelectorDecisions.WithLabelValues("rr", "b").Inc()
@@ -81,6 +82,7 @@ func TestNew_AllCollectorsExposed(t *testing.T) {
 	wantNames := []string{
 		"lb_requests_total",
 		"lb_request_duration_seconds",
+		"lb_requests_dropped_total",
 		"lb_websocket_upgrades_total",
 		"lb_backend_pool_size",
 		"lb_selector_decisions_total",

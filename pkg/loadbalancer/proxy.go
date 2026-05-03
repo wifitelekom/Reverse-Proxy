@@ -353,6 +353,12 @@ func (lb *LoadBalancer) handleRequest(w http.ResponseWriter, r *http.Request) {
 	aliveNodes := lb.membership.GetAliveMembers()
 	if len(aliveNodes) == 0 {
 		lb.logger.Error("no healthy backends available")
+		// These pre-select 503s aren't counted in lb_requests_total
+		// (no backend label). Track them in a separate counter so
+		// dashboards can see the true ingress rate.
+		if lb.metrics != nil {
+			lb.metrics.RequestsDropped.WithLabelValues("no_alive_backends").Inc()
+		}
 		http.Error(w, "no healthy backends available", http.StatusServiceUnavailable)
 		return
 	}
@@ -376,6 +382,13 @@ func (lb *LoadBalancer) handleRequest(w http.ResponseWriter, r *http.Request) {
 
 	selected := lb.selector.Select(backends)
 	if selected == nil {
+		// Reachable when every alive NodeInfo has a malformed
+		// ServiceAddr (newBackend returned nil for each), so the pool
+		// is empty even though gossip says alive. Distinct enough from
+		// "no alive backends" to warrant its own reason label.
+		if lb.metrics != nil {
+			lb.metrics.RequestsDropped.WithLabelValues("no_valid_backends").Inc()
+		}
 		http.Error(w, "no backend selected", http.StatusServiceUnavailable)
 		return
 	}

@@ -32,6 +32,7 @@ type Metrics struct {
 	// HTTP request flow ------------------------------------------------
 	RequestsTotal     *prometheus.CounterVec   // labels: backend, status_class, method
 	RequestDuration   *prometheus.HistogramVec // labels: backend, status_class
+	RequestsDropped   *prometheus.CounterVec   // labels: reason — pre-select 5xx
 	WebsocketTotal    *prometheus.CounterVec   // labels: backend
 	BackendPoolSize   prometheus.Gauge         // current alive-backend count
 	SelectorDecisions *prometheus.CounterVec   // labels: strategy, backend
@@ -81,6 +82,14 @@ func New() *Metrics {
 				},
 			},
 			[]string{"backend", "status_class"},
+		),
+		RequestsDropped: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Namespace: "lb",
+				Name:      "requests_dropped_total",
+				Help:      "Number of incoming requests dropped before any backend was selected, by reason. These are NOT counted in lb_requests_total because there is no backend label to attribute them to. Sum of (requests_total + requests_dropped_total) gives true ingress rate.",
+			},
+			[]string{"reason"},
 		),
 		WebsocketTotal: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
@@ -176,6 +185,7 @@ func New() *Metrics {
 	reg.MustRegister(
 		m.RequestsTotal,
 		m.RequestDuration,
+		m.RequestsDropped,
 		m.WebsocketTotal,
 		m.BackendPoolSize,
 		m.SelectorDecisions,

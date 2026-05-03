@@ -67,6 +67,18 @@ func main() {
 	// nothing for Prometheus and the /_lb/metrics endpoint returns 503.
 	metricsEnabled := flag.Bool("metrics", false, "Expose Prometheus metrics at /_lb/metrics")
 
+	// Feature toggles for SWIM extensions and HTTP health checking.
+	// These are also settable via config file / env vars, but the
+	// boolean shortcut makes one-off testing painless. The flag is
+	// "set if true, leave alone if false" — so leaving them off here
+	// doesn't override an explicit config-file enable.
+	lifeguardEnabled := flag.Bool("lifeguard", false,
+		"Enable Lifeguard SWIM extensions (Self-Awareness, Dogpile, Buddy)")
+	healthCheckEnabled := flag.Bool("health-check", false,
+		"Enable HTTP-level health checks against backends")
+	healthCheckPath := flag.String("health-check-path", "",
+		"Backend endpoint to probe (default /health)")
+
 	flag.Parse()
 
 	// 1. Resolve config — file (or defaults) → env → flags
@@ -122,6 +134,19 @@ func main() {
 	}
 	if *backendTLSCA != "" {
 		cfg.BackendTLS.CAFile = *backendTLSCA
+	}
+
+	// Feature toggles. Same convention as TLS: only flip true; never
+	// flip false from CLI, so a config-file enable can't be silently
+	// undone by the absence of a flag.
+	if *lifeguardEnabled {
+		cfg.Protocol.LifeguardEnabled = true
+	}
+	if *healthCheckEnabled {
+		cfg.HealthCheck.Enabled = true
+	}
+	if *healthCheckPath != "" {
+		cfg.HealthCheck.Path = *healthCheckPath
 	}
 
 	if err := config.ValidateLB(cfg); err != nil {

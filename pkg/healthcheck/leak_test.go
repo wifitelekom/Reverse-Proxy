@@ -10,19 +10,27 @@ import (
 	"go.uber.org/goleak"
 )
 
-// Note: we don't use TestMain + VerifyTestMain in this package because
-// the audit identified known leaks under stress (H-1: OnStatusChange
-// callbacks can run as orphan goroutines). The fix is queued for the
-// next phase; once it lands, this file should add goleak.VerifyTestMain
-// like pkg/config and pkg/metrics already do.
+// TestMain enforces zero goroutine leaks across every test in this
+// package. The audit's H-1 finding (unbounded OnStatusChange goroutine
+// fanout) was closed in commit C; before the fix this file used
+// per-test VerifyNone calls because TestMain coverage would have
+// flagged the known leak as a failure. Now that the bound is in
+// place — and the saturation test deterministically drains its
+// blocked callbacks before returning — TestMain coverage is the
+// stronger contract.
 //
-// In the meantime we keep goleak coverage on individual operations we
-// *do* believe leak-free. Each test below uses goleak.VerifyNone to
-// pin that contract per-test, which is more targeted than a package-
-// wide assertion.
+// goleak.VerifyTestMain runs after every test exits. Any goroutine
+// traceable to this package that's still running at that point is a
+// regression and fails the suite.
+func TestMain(m *testing.M) {
+	goleak.VerifyTestMain(m)
+}
 
-// TestLeak_DisabledCheckerStartsNoGoroutines: when Enabled=false, Start
-// must be a true no-op — no ticker, no fan-out goroutines, nothing.
+// TestLeak_DisabledCheckerStartsNoGoroutines is preserved for its
+// targeted contract: a disabled Checker's Start must be a true no-op,
+// not just "drains within budget". TestMain alone would catch a leak
+// here, but per-test VerifyNone confirms the no-op happens within the
+// test boundary rather than during cleanup.
 func TestLeak_DisabledCheckerStartsNoGoroutines(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
@@ -36,10 +44,10 @@ func TestLeak_DisabledCheckerStartsNoGoroutines(t *testing.T) {
 	time.Sleep(20 * time.Millisecond)
 }
 
-// TestLeak_StartStopRespectsContext: an enabled checker, started and then
-// canceled, must drain to zero goroutines. This is the contract for
-// graceful shutdown — without it, a long-lived process restarting the
-// checker would leak per restart.
+// TestLeak_StartStopRespectsContext: an enabled checker, started and
+// then canceled, must drain to zero goroutines. Per-test VerifyNone
+// keeps this assertion local to the canceling Window — relying on
+// TestMain alone would let a delayed exit slip through.
 func TestLeak_StartStopRespectsContext(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
