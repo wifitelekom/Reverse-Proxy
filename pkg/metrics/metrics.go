@@ -39,6 +39,7 @@ type Metrics struct {
 	// Gossip flow -----------------------------------------------------
 	GossipMessagesSent     *prometheus.CounterVec // labels: type
 	GossipMessagesReceived *prometheus.CounterVec // labels: type
+	GossipMessagesRejected *prometheus.CounterVec // labels: reason
 	GossipStateTransitions *prometheus.CounterVec // labels: from, to
 	GossipLifeguardNoop    prometheus.Gauge       // current self-awareness score
 
@@ -121,6 +122,14 @@ func New() *Metrics {
 			},
 			[]string{"type"},
 		),
+		GossipMessagesRejected: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Namespace: "gossip",
+				Name:      "messages_rejected_total",
+				Help:      "Number of SWIM messages dropped before processing, partitioned by reason. A non-zero source_mismatch count indicates possible impersonation attempts on the gossip ring.",
+			},
+			[]string{"reason"},
+		),
 		GossipStateTransitions: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
 				Namespace: "gossip",
@@ -172,6 +181,7 @@ func New() *Metrics {
 		m.SelectorDecisions,
 		m.GossipMessagesSent,
 		m.GossipMessagesReceived,
+		m.GossipMessagesRejected,
 		m.GossipStateTransitions,
 		m.GossipLifeguardNoop,
 		m.HealthChecksTotal,

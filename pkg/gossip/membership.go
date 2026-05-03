@@ -13,11 +13,21 @@ import (
 // suspectConfirmers is the Lifeguard "Dogpile" vote set: each unique
 // confirmer ID counts as one independent suspicion. Cleared automatically
 // when the node is observed alive again or transitions to dead.
+//
+// srcAddr is the UDP source address (IP:port form) we have on file for
+// this node. It is the audit's C-2 anti-spoof anchor: any incoming
+// gossip message claiming to be from this nodeID must arrive from
+// srcAddr, otherwise the message is forged. srcAddr is empty for
+// entries created indirectly (e.g. via piggyback Members from a third
+// party), and gets pinned the first time we receive a direct message
+// from this node — see VerifyOrPinSource for the trust-on-first-use
+// semantics and edge cases.
 type nodeEntry struct {
 	info              NodeInfo
 	suspectTimer      *time.Timer
 	suspectCancel     func()
 	suspectConfirmers map[string]bool
+	srcAddr           string
 }
 
 // MembershipList thread-safe SWIM üyelik tablosudur.
@@ -56,6 +66,91 @@ func (ml *MembershipList) SetMetricsHook(h MetricsHook) {
 		return
 	}
 	ml.metrics = h
+}
+
+// SourceVerification is the outcome of VerifyOrPinSource.
+type SourceVerification int
+
+const (
+	// SourceUnknownTOFU: no recorded source for this nodeID. Caller
+	// should let the message through; the entry will be created via
+	// piggyback processing, and a future call will pin srcAddr.
+	SourceUnknownTOFU SourceVerification = iota
+
+	// SourcePinnedNow: an entry existed but had no recorded source.
+	// We pinned srcAddr and accept this message. Future messages
+	// must match.
+	SourcePinnedNow
+
+	// SourceMatch: srcAddr matches the recorded source. Accept.
+	SourceMatch
+
+	// SourceMismatch: srcAddr differs from the recorded source.
+	// Drop the message — it's almost certainly forged.
+	SourceMismatch
+)
+
+// VerifyOrPinSource is the C-2 anti-spoof check.
+//
+// An attacker on the gossip network can craft messages with arbitrary
+// SenderID values to inflate Dogpile's independent-vote count and
+// force premature suspect→dead transitions on victim nodes. The
+// defense is to verify that messages claiming to be from a nodeID
+// actually arrive from the UDP source we have recorded for that node.
+//
+// Semantics:
+//   - First message from an unknown nodeID: SourceUnknownTOFU. Caller
+//     accepts — piggyback processing creates the entry; the next
+//     message will pin srcAddr.
+//   - Existing entry with empty srcAddr (e.g. piggyback-created):
+//     SourcePinnedNow. We record srcAddr; future calls must match.
+//   - Existing entry with matching srcAddr: SourceMatch. Accept.
+//   - Existing entry with different srcAddr: SourceMismatch. Reject.
+//
+// Trade-off: TOFU lets an attacker register N fake IDs, one per
+// fake-ID-to-srcAddr binding. ConfirmSuspect's per-confirmerID dedup
+// caps repeated abuse from a single bound pair. The long-term defense
+// is gossip encryption/authentication via shared key; this method is
+// the cheap, deps-free line of defense.
+func (ml *MembershipList) VerifyOrPinSource(nodeID, srcAddr string) SourceVerification {
+	if nodeID == "" || srcAddr == "" {
+		return SourceUnknownTOFU // caller decides; missing data isn't itself spoofing
+	}
+	ml.mu.Lock()
+	defer ml.mu.Unlock()
+	entry, ok := ml.members[nodeID]
+	if !ok {
+		return SourceUnknownTOFU
+	}
+	if entry.srcAddr == "" {
+		entry.srcAddr = srcAddr
+		return SourcePinnedNow
+	}
+	if entry.srcAddr == srcAddr {
+		return SourceMatch
+	}
+	return SourceMismatch
+}
+
+// PinSourceIfAbsent records srcAddr for nodeID if no source was
+// recorded yet. Used by the post-piggyback pinning step in
+// processMessage so that the FIRST message from a previously-unknown
+// node still ends up with a pinned srcAddr after the entry is created.
+//
+// Returns true if a pin happened (entry now has srcAddr); false if
+// the entry already had a source or the nodeID is unknown.
+func (ml *MembershipList) PinSourceIfAbsent(nodeID, srcAddr string) bool {
+	if nodeID == "" || srcAddr == "" {
+		return false
+	}
+	ml.mu.Lock()
+	defer ml.mu.Unlock()
+	entry, ok := ml.members[nodeID]
+	if !ok || entry.srcAddr != "" {
+		return false
+	}
+	entry.srcAddr = srcAddr
+	return true
 }
 
 // AddOrUpdate bir node'u ekler veya günceller.

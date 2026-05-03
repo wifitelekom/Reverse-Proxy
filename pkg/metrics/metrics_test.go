@@ -66,6 +66,7 @@ func TestNew_AllCollectorsExposed(t *testing.T) {
 	m.SelectorDecisions.WithLabelValues("rr", "b").Inc()
 	m.GossipMessagesSent.WithLabelValues("PING").Inc()
 	m.GossipMessagesReceived.WithLabelValues("PING").Inc()
+	m.GossipMessagesRejected.WithLabelValues("source_mismatch").Inc()
 	m.GossipStateTransitions.WithLabelValues("ALIVE", "SUSPECT").Inc()
 	m.GossipLifeguardNoop.Set(0)
 	m.HealthChecksTotal.WithLabelValues("healthy").Inc()
@@ -85,6 +86,7 @@ func TestNew_AllCollectorsExposed(t *testing.T) {
 		"lb_selector_decisions_total",
 		"gossip_messages_sent_total",
 		"gossip_messages_received_total",
+		"gossip_messages_rejected_total",
 		"gossip_state_transitions_total",
 		"gossip_lifeguard_self_awareness",
 		"health_checks_total",

@@ -321,9 +321,44 @@ func (p *Protocol) handleMessages(ctx context.Context) {
 // ctx is propagated to handlers that spawn long-lived goroutines (notably
 // handlePingReq). Without it, those goroutines would survive a protocol
 // shutdown for up to IndirectTimeout — the audit's H-2 finding.
+//
+// SenderID is validated against the UDP source address (audit's C-2):
+// if we already have a pinned source for the SenderID and it differs,
+// the message is forged and dropped. The first message from a new node
+// goes through under TOFU; the post-piggyback pin step ensures the
+// next message from that same node is bound to its actual src address.
 func (p *Protocol) processMessage(ctx context.Context, received ReceivedMessage) {
 	msg := received.Msg
 	p.metrics.OnMessageReceived(string(msg.Type))
+
+	// C-2 anti-spoof: verify SenderID source BEFORE processing piggyback.
+	// Otherwise a forged message could poison the membership table via
+	// piggyback Members even if we'd later drop the message.
+	//
+	// We skip validation when:
+	//   - SenderID is empty or matches our own ID (defensive — neither
+	//     condition normally arises, but both are safe to ignore).
+	//   - The membership has no entry yet for SenderID (TOFU bootstrap).
+	//     The PinSourceIfAbsent call after piggyback locks the source
+	//     so subsequent messages will be verified.
+	srcAddr := ""
+	if received.From != nil {
+		srcAddr = received.From.String()
+	}
+	if msg.SenderID != "" && msg.SenderID != p.localInfo.ID && srcAddr != "" {
+		switch p.membership.VerifyOrPinSource(msg.SenderID, srcAddr) {
+		case SourceMismatch:
+			p.logger.Warn("rejected gossip message: source address mismatch",
+				"claimed_sender", msg.SenderID,
+				"actual_source", srcAddr,
+				"type", string(msg.Type))
+			p.metrics.OnMessageRejected("source_mismatch")
+			return
+		case SourceUnknownTOFU, SourcePinnedNow, SourceMatch:
+			// Allow through. SourceUnknownTOFU will be pinned after
+			// piggyback creates the entry, below.
+		}
+	}
 
 	// Piggyback üyelik bilgisini işle
 	for _, memberInfo := range msg.Members {
@@ -336,6 +371,14 @@ func (p *Protocol) processMessage(ctx context.Context, received ReceivedMessage)
 			continue
 		}
 		p.membership.AddOrUpdate(memberInfo)
+	}
+
+	// C-2 step 2: pin SenderID's source if piggyback just created the
+	// entry. This closes the TOFU window after the first message —
+	// subsequent messages from the same nodeID must come from this
+	// same UDP source.
+	if msg.SenderID != "" && msg.SenderID != p.localInfo.ID && srcAddr != "" {
+		p.membership.PinSourceIfAbsent(msg.SenderID, srcAddr)
 	}
 
 	switch msg.Type {

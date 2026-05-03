@@ -17,6 +17,11 @@ package gossip
 type MetricsHook interface {
 	OnMessageSent(msgType string)
 	OnMessageReceived(msgType string)
+	// OnMessageRejected is called when a message is dropped without
+	// being processed. reason is a short, low-cardinality label
+	// (e.g. "source_mismatch") that should NOT include nodeID or
+	// addresses — those would explode the Prometheus label space.
+	OnMessageRejected(reason string)
 	OnStateChange(nodeID, from, to string)
 	OnLifeguardScore(score int)
 }
@@ -25,7 +30,8 @@ type MetricsHook interface {
 // hot path can call through unconditionally without nil checks.
 type noopMetricsHook struct{}
 
-func (noopMetricsHook) OnMessageSent(string)             {}
-func (noopMetricsHook) OnMessageReceived(string)         {}
+func (noopMetricsHook) OnMessageSent(string)                 {}
+func (noopMetricsHook) OnMessageReceived(string)             {}
+func (noopMetricsHook) OnMessageRejected(string)             {}
 func (noopMetricsHook) OnStateChange(string, string, string) {}
-func (noopMetricsHook) OnLifeguardScore(int)             {}
+func (noopMetricsHook) OnLifeguardScore(int)                 {}
