@@ -20,6 +20,9 @@ func LoadNode(path string) (NodeConfig, error) {
 	}
 	cfg.Protocol = applyProtocolDefaults(cfg.Protocol)
 	cfg.Logging = applyLoggingDefaults(cfg.Logging)
+	if cfg.ShutdownTimeout.Duration == 0 {
+		cfg.ShutdownTimeout = DefaultNodeConfig().ShutdownTimeout
+	}
 	return cfg, nil
 }
 
@@ -46,6 +49,9 @@ func LoadLB(path string) (LBConfig, error) {
 	}
 	if cfg.NodeID == "" {
 		cfg.NodeID = "loadbalancer"
+	}
+	if cfg.ShutdownTimeout.Duration == 0 {
+		cfg.ShutdownTimeout = DefaultLBConfig().ShutdownTimeout
 	}
 	return cfg, nil
 }

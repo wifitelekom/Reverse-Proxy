@@ -270,9 +270,24 @@ func NewLoadBalancer(
 // supplies them — that callback reads from the CertManager so hot-reload
 // works.
 func (lb *LoadBalancer) Start(ctx context.Context) error {
+	// shutdownBudget is the time window we give in-flight requests to
+	// finish during graceful shutdown. The previous hardcoded 5s was
+	// silently truncating gRPC server-streaming RPCs and WebSocket
+	// sessions; honoring the configured value lets operators tune the
+	// trade-off between fast restarts and avoiding mid-stream tears.
+	//
+	// Defensive fallback: a hand-constructed types.LBConfig (one not
+	// run through pkg/config.ValidateLB) might leave this zero. We pick
+	// a sane default rather than panicking — context.WithTimeout(0)
+	// would cancel immediately and silently skip every in-flight request.
+	shutdownBudget := lb.config.ShutdownTimeout
+	if shutdownBudget <= 0 {
+		shutdownBudget = 30 * time.Second
+	}
+
 	go func() {
 		<-ctx.Done()
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownBudget)
 		defer cancel()
 		lb.server.Shutdown(shutdownCtx)
 	}()

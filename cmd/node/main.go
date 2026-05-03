@@ -43,6 +43,8 @@ func main() {
 	seeds := flag.String("seeds", "", "Comma-separated seed nodes (e.g. :9002,:9003)")
 	logLevel := flag.String("log-level", "", "Log level: debug|info|warn|error (default info)")
 	logFormat := flag.String("log-format", "", "Log format: text|json (default json)")
+	shutdownTimeout := flag.Duration("shutdown-timeout", 0,
+		"Graceful shutdown budget for in-flight requests (default 30s)")
 	flag.Parse()
 
 	// 1. Resolve config — file (or defaults) → env → flags
@@ -58,12 +60,13 @@ func main() {
 	cfg = config.ApplyEnvNode(cfg)
 
 	flags := config.NodeFlags{
-		ID:          *nodeID,
-		GossipAddr:  *gossipAddr,
-		ServiceAddr: *serviceAddr,
-		SeedNodes:   splitSeeds(*seeds),
-		LogLevel:    *logLevel,
-		LogFormat:   *logFormat,
+		ID:              *nodeID,
+		GossipAddr:      *gossipAddr,
+		ServiceAddr:     *serviceAddr,
+		SeedNodes:       splitSeeds(*seeds),
+		ShutdownTimeout: *shutdownTimeout,
+		LogLevel:        *logLevel,
+		LogFormat:       *logFormat,
 	}
 	cfg = config.MergeNode(cfg, flags)
 
@@ -222,10 +225,17 @@ func main() {
 	}
 
 	// Graceful shutdown:
-	// 1. HTTP server stops accepting requests
+	// 1. HTTP server stops accepting requests (within ShutdownTimeout)
 	// 2. Context cancel stops gossip goroutines
 	// 3. Transport closes via ctx
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	//
+	// ShutdownTimeout comes from config so streaming workloads can give
+	// in-flight requests time to drain instead of being torn at 5s.
+	shutdownBudget := cfg.ShutdownTimeout.Duration
+	if shutdownBudget <= 0 {
+		shutdownBudget = 30 * time.Second
+	}
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), shutdownBudget)
 	defer shutdownCancel()
 
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {

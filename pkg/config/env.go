@@ -32,6 +32,11 @@ func ApplyEnvLB(cfg LBConfig) LBConfig {
 	if v := os.Getenv(envPrefix + "SEED_NODES"); v != "" {
 		cfg.SeedNodes = splitAndTrim(v)
 	}
+	if v := os.Getenv(envPrefix + "SHUTDOWN_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			cfg.ShutdownTimeout = Duration{d}
+		}
+	}
 	cfg.Logging = applyEnvLogging(cfg.Logging)
 	cfg.Protocol = applyEnvProtocol(cfg.Protocol)
 	return cfg
@@ -50,6 +55,11 @@ func ApplyEnvNode(cfg NodeConfig) NodeConfig {
 	}
 	if v := os.Getenv(envPrefix + "SEED_NODES"); v != "" {
 		cfg.SeedNodes = splitAndTrim(v)
+	}
+	if v := os.Getenv(envPrefix + "SHUTDOWN_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			cfg.ShutdownTimeout = Duration{d}
+		}
 	}
 	cfg.Logging = applyEnvLogging(cfg.Logging)
 	cfg.Protocol = applyEnvProtocol(cfg.Protocol)

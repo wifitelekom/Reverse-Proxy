@@ -34,6 +34,13 @@ func ValidateLB(cfg LBConfig) error {
 		errs = append(errs, fmt.Sprintf("unknown strategy %q (valid: roundrobin, leastconn, p2c, p2c-ewma)", cfg.Strategy))
 	}
 
+	if cfg.ShutdownTimeout.Duration <= 0 {
+		errs = append(errs, fmt.Sprintf(
+			"shutdown_timeout must be > 0, got %v",
+			cfg.ShutdownTimeout.Duration,
+		))
+	}
+
 	errs = append(errs, validateProtocol(cfg.Protocol)...)
 	errs = append(errs, validateLogging(cfg.Logging)...)
 	errs = append(errs, validateHealthCheck(cfg.HealthCheck)...)
@@ -55,6 +62,12 @@ func ValidateNode(cfg NodeConfig) error {
 	}
 	if cfg.ServiceAddr == "" {
 		errs = append(errs, "service_addr must not be empty")
+	}
+	if cfg.ShutdownTimeout.Duration <= 0 {
+		errs = append(errs, fmt.Sprintf(
+			"shutdown_timeout must be > 0, got %v",
+			cfg.ShutdownTimeout.Duration,
+		))
 	}
 
 	errs = append(errs, validateProtocol(cfg.Protocol)...)

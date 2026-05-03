@@ -133,26 +133,28 @@ type HealthCheckCfg struct {
 
 // NodeConfig is the file-loadable config for a backend node.
 type NodeConfig struct {
-	ID          string      `json:"id"           toml:"id"`
-	GossipAddr  string      `json:"gossip_addr"  toml:"gossip_addr"`
-	ServiceAddr string      `json:"service_addr" toml:"service_addr"`
-	SeedNodes   []string    `json:"seed_nodes"   toml:"seed_nodes"`
-	Protocol    ProtocolCfg `json:"protocol"     toml:"protocol"`
-	Logging     LoggingCfg  `json:"logging"      toml:"logging"`
+	ID              string      `json:"id"               toml:"id"`
+	GossipAddr      string      `json:"gossip_addr"      toml:"gossip_addr"`
+	ServiceAddr     string      `json:"service_addr"     toml:"service_addr"`
+	SeedNodes       []string    `json:"seed_nodes"       toml:"seed_nodes"`
+	ShutdownTimeout Duration    `json:"shutdown_timeout" toml:"shutdown_timeout"`
+	Protocol        ProtocolCfg `json:"protocol"         toml:"protocol"`
+	Logging         LoggingCfg  `json:"logging"          toml:"logging"`
 }
 
 // LBConfig is the file-loadable config for the load balancer.
 type LBConfig struct {
-	Listen      string         `json:"listen"       toml:"listen"`
-	Strategy    string         `json:"strategy"     toml:"strategy"`
-	GossipAddr  string         `json:"gossip_addr"  toml:"gossip_addr"`
-	NodeID      string         `json:"node_id"      toml:"node_id"`
-	SeedNodes   []string       `json:"seed_nodes"   toml:"seed_nodes"`
-	Protocol    ProtocolCfg    `json:"protocol"     toml:"protocol"`
-	HealthCheck HealthCheckCfg `json:"health_check" toml:"health_check"`
-	TLS         TLSCfg         `json:"tls"          toml:"tls"`
-	BackendTLS  BackendTLSCfg  `json:"backend_tls"  toml:"backend_tls"`
-	Logging     LoggingCfg     `json:"logging"      toml:"logging"`
+	Listen          string         `json:"listen"            toml:"listen"`
+	Strategy        string         `json:"strategy"          toml:"strategy"`
+	GossipAddr      string         `json:"gossip_addr"       toml:"gossip_addr"`
+	NodeID          string         `json:"node_id"           toml:"node_id"`
+	SeedNodes       []string       `json:"seed_nodes"        toml:"seed_nodes"`
+	ShutdownTimeout Duration       `json:"shutdown_timeout"  toml:"shutdown_timeout"`
+	Protocol        ProtocolCfg    `json:"protocol"          toml:"protocol"`
+	HealthCheck     HealthCheckCfg `json:"health_check"      toml:"health_check"`
+	TLS             TLSCfg         `json:"tls"               toml:"tls"`
+	BackendTLS      BackendTLSCfg  `json:"backend_tls"       toml:"backend_tls"`
+	Logging         LoggingCfg     `json:"logging"           toml:"logging"`
 }
 
 // DefaultProtocolCfg returns production-safe SWIM defaults.
@@ -217,24 +219,32 @@ func DefaultHealthCheckCfg() HealthCheckCfg {
 // ID, GossipAddr and ServiceAddr have no defaults — they must be supplied.
 func DefaultNodeConfig() NodeConfig {
 	return NodeConfig{
-		Protocol: DefaultProtocolCfg(),
-		Logging:  DefaultLoggingCfg(),
+		ShutdownTimeout: Duration{30 * time.Second},
+		Protocol:        DefaultProtocolCfg(),
+		Logging:         DefaultLoggingCfg(),
 	}
 }
 
 // DefaultLBConfig returns a fresh LBConfig with default values matching the
 // previous CLI defaults (":8080", "roundrobin", ":9000", "loadbalancer").
+//
+// ShutdownTimeout defaults to 30 seconds — generous enough for in-flight
+// streaming requests (gRPC server-streaming, WebSocket sessions) to wind
+// down naturally, but not so long that a stuck shutdown holds a deploy
+// hostage. Operators serving long-running streams should bump this; ones
+// running pure unary RPC can lower it for faster restarts.
 func DefaultLBConfig() LBConfig {
 	return LBConfig{
-		Listen:      ":8080",
-		Strategy:    "roundrobin",
-		GossipAddr:  ":9000",
-		NodeID:      "loadbalancer",
-		Protocol:    DefaultProtocolCfg(),
-		HealthCheck: DefaultHealthCheckCfg(),
-		TLS:         DefaultTLSCfg(),
-		BackendTLS:  DefaultBackendTLSCfg(),
-		Logging:     DefaultLoggingCfg(),
+		Listen:          ":8080",
+		Strategy:        "roundrobin",
+		GossipAddr:      ":9000",
+		NodeID:          "loadbalancer",
+		ShutdownTimeout: Duration{30 * time.Second},
+		Protocol:        DefaultProtocolCfg(),
+		HealthCheck:     DefaultHealthCheckCfg(),
+		TLS:             DefaultTLSCfg(),
+		BackendTLS:      DefaultBackendTLSCfg(),
+		Logging:         DefaultLoggingCfg(),
 	}
 }
 
@@ -266,15 +276,16 @@ func (p ProtocolCfg) ToInternalProtocol(nodeID, gossipAddr, serviceAddr string, 
 // ToInternal converts an LBConfig to the existing types.LBConfig.
 func (c LBConfig) ToInternal() types.LBConfig {
 	return types.LBConfig{
-		ListenAddr:  c.Listen,
-		Strategy:    c.Strategy,
-		GossipAddr:  c.GossipAddr,
-		NodeID:      c.NodeID,
-		SeedNodes:   c.SeedNodes,
-		Protocol:    c.Protocol.ToInternalProtocol(c.NodeID, c.GossipAddr, "", c.SeedNodes),
-		HealthCheck: c.HealthCheck.ToInternal(),
-		TLS:         c.TLS.ToInternal(),
-		BackendTLS:  c.BackendTLS.ToInternal(),
+		ListenAddr:      c.Listen,
+		Strategy:        c.Strategy,
+		GossipAddr:      c.GossipAddr,
+		NodeID:          c.NodeID,
+		SeedNodes:       c.SeedNodes,
+		ShutdownTimeout: c.ShutdownTimeout.Duration,
+		Protocol:        c.Protocol.ToInternalProtocol(c.NodeID, c.GossipAddr, "", c.SeedNodes),
+		HealthCheck:     c.HealthCheck.ToInternal(),
+		TLS:             c.TLS.ToInternal(),
+		BackendTLS:      c.BackendTLS.ToInternal(),
 	}
 }
 

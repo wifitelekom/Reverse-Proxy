@@ -46,6 +46,8 @@ func main() {
 	seeds := flag.String("seeds", "", "Comma-separated seed nodes")
 	logLevel := flag.String("log-level", "", "Log level: debug|info|warn|error (default info)")
 	logFormat := flag.String("log-format", "", "Log format: text|json (default json)")
+	shutdownTimeout := flag.Duration("shutdown-timeout", 0,
+		"Graceful shutdown budget for in-flight requests (default 30s)")
 
 	// TLS flags. Defaults are zero so the merge layer can detect "not set".
 	// Booleans use *string trickery via empty == not-set; for simplicity we
@@ -80,13 +82,14 @@ func main() {
 	cfg = config.ApplyEnvLB(cfg)
 
 	flags := config.LBFlags{
-		Listen:     *listenAddr,
-		Strategy:   *strategy,
-		GossipAddr: *gossipAddr,
-		NodeID:     *nodeID,
-		SeedNodes:  splitSeeds(*seeds),
-		LogLevel:   *logLevel,
-		LogFormat:  *logFormat,
+		Listen:          *listenAddr,
+		Strategy:        *strategy,
+		GossipAddr:      *gossipAddr,
+		NodeID:          *nodeID,
+		SeedNodes:       splitSeeds(*seeds),
+		ShutdownTimeout: *shutdownTimeout,
+		LogLevel:        *logLevel,
+		LogFormat:       *logFormat,
 	}
 	cfg = config.MergeLB(cfg, flags)
 

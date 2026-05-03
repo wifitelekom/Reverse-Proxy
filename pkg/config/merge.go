@@ -1,18 +1,24 @@
 package config
 
+import "time"
+
 // LBFlags holds CLI-supplied values for the load balancer. Empty strings and
 // nil slices mean "not set by user" — the merge logic preserves the file
 // value in that case. This relies on the convention that we set CLI flag
 // defaults to "" (or nil) rather than the actual default, so the absence of
 // a flag is distinguishable from an explicit empty value.
+//
+// ShutdownTimeout uses a duration with zero meaning "not set" — same
+// pattern, different type.
 type LBFlags struct {
-	Listen     string
-	Strategy   string
-	GossipAddr string
-	NodeID     string
-	SeedNodes  []string
-	LogLevel   string
-	LogFormat  string
+	Listen          string
+	Strategy        string
+	GossipAddr      string
+	NodeID          string
+	SeedNodes       []string
+	ShutdownTimeout time.Duration
+	LogLevel        string
+	LogFormat       string
 }
 
 // MergeLB applies CLI flags on top of a file-loaded LBConfig.
@@ -33,6 +39,9 @@ func MergeLB(cfg LBConfig, flags LBFlags) LBConfig {
 	if len(flags.SeedNodes) > 0 {
 		cfg.SeedNodes = flags.SeedNodes
 	}
+	if flags.ShutdownTimeout > 0 {
+		cfg.ShutdownTimeout = Duration{flags.ShutdownTimeout}
+	}
 	if flags.LogLevel != "" {
 		cfg.Logging.Level = flags.LogLevel
 	}
@@ -44,12 +53,13 @@ func MergeLB(cfg LBConfig, flags LBFlags) LBConfig {
 
 // NodeFlags holds CLI-supplied values for backend nodes.
 type NodeFlags struct {
-	ID          string
-	GossipAddr  string
-	ServiceAddr string
-	SeedNodes   []string
-	LogLevel    string
-	LogFormat   string
+	ID              string
+	GossipAddr      string
+	ServiceAddr     string
+	SeedNodes       []string
+	ShutdownTimeout time.Duration
+	LogLevel        string
+	LogFormat       string
 }
 
 // MergeNode applies CLI flags on top of a file-loaded NodeConfig.
@@ -65,6 +75,9 @@ func MergeNode(cfg NodeConfig, flags NodeFlags) NodeConfig {
 	}
 	if len(flags.SeedNodes) > 0 {
 		cfg.SeedNodes = flags.SeedNodes
+	}
+	if flags.ShutdownTimeout > 0 {
+		cfg.ShutdownTimeout = Duration{flags.ShutdownTimeout}
 	}
 	if flags.LogLevel != "" {
 		cfg.Logging.Level = flags.LogLevel

@@ -193,14 +193,23 @@ type HealthCheckConfig struct {
 }
 
 // LBConfig load balancer yapılandırmasını tutar.
+//
+// ShutdownTimeout bounds graceful shutdown when the parent context is
+// canceled. The previous hardcoded 5s was actively unsafe alongside the
+// streaming features we ship: gRPC server-streaming RPCs and long-lived
+// WebSocket sessions get their connections forcibly closed at the 5s
+// mark even when they're making progress. Default 30s is generous
+// enough for most streaming workloads but not infinite — operators
+// should tune based on their typical request lifetime. Must be > 0.
 type LBConfig struct {
-	ListenAddr  string // LB'nin HTTP dinleme adresi (örn: ":8080")
-	Strategy    string // "roundrobin" | "leastconn" | "p2c" | "p2c-ewma"
-	GossipAddr  string // LB'nin UDP gossip adresi (örn: ":9000")
-	NodeID      string // LB'nin gossip node ID'si
-	SeedNodes   []string
-	Protocol    ProtocolConfig
-	HealthCheck HealthCheckConfig
-	TLS         TLSConfig
-	BackendTLS  BackendTLSConfig
+	ListenAddr      string // LB'nin HTTP dinleme adresi (örn: ":8080")
+	Strategy        string // "roundrobin" | "leastconn" | "p2c" | "p2c-ewma"
+	GossipAddr      string // LB'nin UDP gossip adresi (örn: ":9000")
+	NodeID          string // LB'nin gossip node ID'si
+	SeedNodes       []string
+	ShutdownTimeout time.Duration // graceful shutdown budget; default 30s
+	Protocol        ProtocolConfig
+	HealthCheck     HealthCheckConfig
+	TLS             TLSConfig
+	BackendTLS      BackendTLSConfig
 }
