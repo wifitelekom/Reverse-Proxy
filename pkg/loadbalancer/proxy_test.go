@@ -58,7 +58,10 @@ func TestProxy_RoutesRequest(t *testing.T) {
 	ml.AddOrUpdate(makeTestNode("node-b", backendB))
 
 	cfg := defaultLBConfig(":0")
-	lb := NewLoadBalancer(cfg, ml, NewRoundRobin(), logger)
+	lb, err := NewLoadBalancer(cfg, ml, NewRoundRobin(), logger, nil, nil)
+	if err != nil {
+		t.Fatalf("NewLoadBalancer: %v", err)
+	}
 
 	// LB'yi test server olarak çalıştır
 	lbServer := httptest.NewServer(http.HandlerFunc(lb.handleRequest))
@@ -97,7 +100,10 @@ func TestProxy_NoBackends503(t *testing.T) {
 	// Membership boş — hiç Alive backend yok
 
 	cfg := defaultLBConfig(":0")
-	lb := NewLoadBalancer(cfg, ml, NewRoundRobin(), logger)
+	lb, err := NewLoadBalancer(cfg, ml, NewRoundRobin(), logger, nil, nil)
+	if err != nil {
+		t.Fatalf("NewLoadBalancer: %v", err)
+	}
 
 	lbServer := httptest.NewServer(http.HandlerFunc(lb.handleRequest))
 	defer lbServer.Close()
@@ -137,7 +143,10 @@ func TestProxy_NilBackendSkipped(t *testing.T) {
 	})
 
 	cfg := defaultLBConfig(":0")
-	lb := NewLoadBalancer(cfg, ml, NewRoundRobin(), logger)
+	lb, err := NewLoadBalancer(cfg, ml, NewRoundRobin(), logger, nil, nil)
+	if err != nil {
+		t.Fatalf("NewLoadBalancer: %v", err)
+	}
 
 	lbServer := httptest.NewServer(http.HandlerFunc(lb.handleRequest))
 	defer lbServer.Close()
@@ -168,7 +177,10 @@ func TestProxy_ActiveConnsPreserved(t *testing.T) {
 	ml.AddOrUpdate(makeTestNode("node-a", backend))
 
 	cfg := defaultLBConfig(":0")
-	lb := NewLoadBalancer(cfg, ml, NewRoundRobin(), logger)
+	lb, err := NewLoadBalancer(cfg, ml, NewRoundRobin(), logger, nil, nil)
+	if err != nil {
+		t.Fatalf("NewLoadBalancer: %v", err)
+	}
 
 	nodes := ml.GetAliveMembers()
 
@@ -197,7 +209,10 @@ func TestProxy_ContextCancel(t *testing.T) {
 	ml := gossip.NewMembershipList("lb", logger)
 
 	cfg := defaultLBConfig("127.0.0.1:0")
-	lb := NewLoadBalancer(cfg, ml, NewRoundRobin(), logger)
+	lb, err := NewLoadBalancer(cfg, ml, NewRoundRobin(), logger, nil, nil)
+	if err != nil {
+		t.Fatalf("NewLoadBalancer: %v", err)
+	}
 	lb.server.Addr = "127.0.0.1:18199" // test için sabit port
 
 	ctx, cancel := context.WithCancel(context.Background())

@@ -14,6 +14,11 @@ import (
 // Protocol SWIM protokol döngüsünü yönetir.
 // 2 goroutine: gossipLoop (ping/ack döngüsü) + handleMessages (gelen mesaj işleyici)
 // Bu iki goroutine pendingPings (sync.Map) üzerinden ACK'ları koordine eder.
+//
+// When config.LifeguardEnabled is true, Self-Awareness adjusts probe
+// timeouts dynamically and Dogpile shortens the suspect window via
+// ConfirmSuspect on MembershipList. The selfAwareness field stays nil if
+// the feature is off, so the hot path has zero overhead.
 type Protocol struct {
 	config     types.ProtocolConfig
 	membership *MembershipList
@@ -22,6 +27,13 @@ type Protocol struct {
 	seqCounter uint64   // atomic artan sequence number
 	pendingPings sync.Map // map[uint64]chan bool — uçuşta PING'ler
 	logger     *slog.Logger
+
+	// selfAwareness is non-nil only when config.LifeguardEnabled.
+	selfAwareness *SelfAwareness
+
+	// metrics is never nil — defaults to a no-op hook so the hot path
+	// can call through without branching. Set via SetMetricsHook.
+	metrics MetricsHook
 }
 
 // NewProtocol yeni bir SWIM protokol instance'ı oluşturur.
@@ -32,13 +44,59 @@ func NewProtocol(
 	localInfo NodeInfo,
 	logger *slog.Logger,
 ) *Protocol {
-	return &Protocol{
+	p := &Protocol{
 		config:    cfg,
 		membership: ml,
 		transport: transport,
 		localInfo: localInfo,
 		logger:    logger,
+		metrics:   noopMetricsHook{},
 	}
+	if cfg.LifeguardEnabled {
+		p.selfAwareness = NewSelfAwareness(cfg.SelfAwarenessMax)
+	}
+	return p
+}
+
+// SetMetricsHook installs the metrics sink. Call once at startup before
+// Start() — the hook is read concurrently from the gossip goroutines.
+// Passing nil silently restores the no-op hook.
+func (p *Protocol) SetMetricsHook(h MetricsHook) {
+	if h == nil {
+		p.metrics = noopMetricsHook{}
+		return
+	}
+	p.metrics = h
+}
+
+// pingTimeout returns the direct ping timeout, scaled by Self-Awareness if
+// Lifeguard is enabled. Falls back to the static PingTimeout otherwise so
+// non-Lifeguard deployments behave exactly as before.
+func (p *Protocol) pingTimeout() time.Duration {
+	if p.selfAwareness != nil {
+		return p.selfAwareness.ScaleTimeout(p.config.PingTimeoutMin, p.config.PingTimeoutMax)
+	}
+	return p.config.PingTimeout
+}
+
+// indirectTimeout returns the indirect ping timeout, scaled if enabled.
+func (p *Protocol) indirectTimeout() time.Duration {
+	if p.selfAwareness != nil {
+		return p.selfAwareness.ScaleTimeout(p.config.IndirectTimeoutMin, p.config.IndirectTimeoutMax)
+	}
+	return p.config.IndirectTimeout
+}
+
+// computeSuspectTimeout returns the Dogpile-formula timeout for the given
+// number of independent confirmations. Used as the closure argument to
+// MembershipList.ConfirmSuspect.
+func (p *Protocol) computeSuspectTimeout(votes int) time.Duration {
+	return dogpileTimeout(
+		p.config.SuspectTimeoutMin,
+		p.config.SuspectTimeoutMax,
+		votes,
+		p.config.IndirectNodes,
+	)
 }
 
 // Start iki goroutine başlatır — non-blocking.
@@ -59,6 +117,11 @@ func (p *Protocol) gossipLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			// Refresh the Lifeguard score gauge once per round. Cheap —
+			// a single mutex Lock/Unlock plus a metric Set.
+			if p.selfAwareness != nil {
+				p.metrics.OnLifeguardScore(p.selfAwareness.Score())
+			}
 			p.runProtocolRound(ctx)
 		}
 	}
@@ -91,9 +154,11 @@ func (p *Protocol) runProtocolRound(ctx context.Context) {
 		p.pendingPings.Delete(seqNum)
 		return
 	}
+	p.metrics.OnMessageSent(string(MsgPing))
 
 	// Adım 1: T_ping timeout ile direkt ACK bekle
-	directTimer := time.NewTimer(p.config.PingTimeout)
+	// Self-Awareness scaling: under stress this can grow up to PingTimeoutMax.
+	directTimer := time.NewTimer(p.pingTimeout())
 	defer directTimer.Stop()
 
 	select {
@@ -102,10 +167,18 @@ func (p *Protocol) runProtocolRound(ctx context.Context) {
 		return
 	case <-replyCh:
 		p.pendingPings.Delete(seqNum)
+		// Lifeguard: successful direct probe → we're healthy, lower noop.
+		if p.selfAwareness != nil {
+			p.selfAwareness.RecordSuccess()
+		}
 		p.logger.Debug("direct ACK received", "target", target.ID)
 		return
 	case <-directTimer.C:
 		// Direct ping timeout — indirect'e geç
+		// Lifeguard: missed direct ACK is the signal that drives noop up.
+		if p.selfAwareness != nil {
+			p.selfAwareness.RecordFailure()
+		}
 	}
 	p.pendingPings.Delete(seqNum)
 
@@ -130,11 +203,13 @@ func (p *Protocol) runProtocolRound(ctx context.Context) {
 	for _, inter := range intermediaries {
 		if err := p.transport.Send(inter.Addr, pingReqMsg); err != nil {
 			p.logger.Error("ping-req send failed", "intermediary", inter.ID, "err", err)
+			continue
 		}
+		p.metrics.OnMessageSent(string(MsgPingReq))
 	}
 
 	// Adım 3: T_indirect timeout ile dolaylı ACK bekle
-	indirectTimer := time.NewTimer(p.config.IndirectTimeout)
+	indirectTimer := time.NewTimer(p.indirectTimeout())
 	defer indirectTimer.Stop()
 
 	select {
@@ -154,14 +229,27 @@ func (p *Protocol) runProtocolRound(ctx context.Context) {
 }
 
 // suspectNode bir node'u suspect ilan eder ve gossip yayar.
+//
+// Lifeguard path (LifeguardEnabled=true):
+//   - Records the local node as the first independent confirmer via
+//     ConfirmSuspect. Initial timeout follows the Dogpile formula.
+//   - Buddy System: sends a SUSPECT message directly to the suspected node
+//     so that, if alive, it can defend itself without waiting for gossip
+//     to propagate the news.
+//
+// Vanilla path: identical to the historical SWIM behaviour.
 func (p *Protocol) suspectNode(nodeID string) {
 	p.logger.Warn("marking node suspect", "id", nodeID)
 
-	p.membership.MarkSuspect(
-		nodeID,
-		p.config.SuspectTimeout,
-		p.gossipDead, // timer dolduğunda çağrılır
-	)
+	if p.config.LifeguardEnabled {
+		p.membership.ConfirmSuspect(nodeID, p.localInfo.ID, p.computeSuspectTimeout, p.gossipDead)
+	} else {
+		p.membership.MarkSuspect(
+			nodeID,
+			p.config.SuspectTimeout,
+			p.gossipDead, // timer dolduğunda çağrılır
+		)
+	}
 
 	suspectMsg := GossipMessage{
 		Type:     MsgSuspect,
@@ -170,6 +258,18 @@ func (p *Protocol) suspectNode(nodeID string) {
 		SeqNum:   p.nextSeq(),
 		Members:  p.membership.GetAllMembers(),
 	}
+
+	// Buddy System: direct notification to the suspected node.
+	// If the node is in fact alive, this lets it defend before gossip arrives.
+	// On a real outage this packet is simply dropped — no harm done.
+	if p.config.LifeguardEnabled {
+		if target, ok := p.membership.GetMember(nodeID); ok && target.Addr != "" {
+			if err := p.transport.Send(target.Addr, suspectMsg); err != nil {
+				p.logger.Debug("buddy notification send failed", "target", nodeID, "err", err)
+			}
+		}
+	}
+
 	p.broadcastToK(suspectMsg)
 }
 
@@ -192,7 +292,9 @@ func (p *Protocol) broadcastToK(msg GossipMessage) {
 	for _, t := range targets {
 		if err := p.transport.Send(t.Addr, msg); err != nil {
 			p.logger.Error("broadcast failed", "target", t.ID, "err", err)
+			continue
 		}
+		p.metrics.OnMessageSent(string(msg.Type))
 	}
 }
 
@@ -217,6 +319,7 @@ func (p *Protocol) handleMessages(ctx context.Context) {
 // Piggyback üyelik bilgisi her mesajda önce işlenir.
 func (p *Protocol) processMessage(received ReceivedMessage) {
 	msg := received.Msg
+	p.metrics.OnMessageReceived(string(msg.Type))
 
 	// Piggyback üyelik bilgisini işle
 	for _, memberInfo := range msg.Members {
@@ -258,7 +361,9 @@ func (p *Protocol) handlePing(from *net.UDPAddr, msg GossipMessage) {
 	}
 	if err := p.transport.Send(from.String(), ack); err != nil {
 		p.logger.Error("ACK send failed", "err", err)
+		return
 	}
+	p.metrics.OnMessageSent(string(MsgAck))
 }
 
 // handleAck bekleyen PING için channel'a bildirim gönderir.
@@ -364,6 +469,11 @@ func (p *Protocol) handleDeadMsg(msg GossipMessage) {
 }
 
 // handleSuspectMsg: gelen SUSPECT mesajını membership'e uygula.
+//
+// Lifeguard: each unique sender counts as an independent Dogpile vote, so
+// the suspect timer shrinks logarithmically as more nodes corroborate.
+// Vanilla: behaves like the original — fixed SuspectTimeout regardless of
+// how many SUSPECT messages we receive.
 func (p *Protocol) handleSuspectMsg(msg GossipMessage) {
 	if msg.TargetID == p.localInfo.ID {
 		// Bizi suspect ilan ettiler — savun
@@ -371,10 +481,21 @@ func (p *Protocol) handleSuspectMsg(msg GossipMessage) {
 		p.announceAlive()
 		return
 	}
-	if existing, found := p.membership.GetMember(msg.TargetID); found {
-		p.membership.MarkSuspect(msg.TargetID, p.config.SuspectTimeout, p.gossipDead)
-		_ = existing
+	if _, found := p.membership.GetMember(msg.TargetID); !found {
+		return
 	}
+	if p.config.LifeguardEnabled {
+		votes, ok := p.membership.ConfirmSuspect(msg.TargetID, msg.SenderID, p.computeSuspectTimeout, p.gossipDead)
+		if ok {
+			p.logger.Debug("dogpile vote recorded",
+				"target", msg.TargetID,
+				"confirmer", msg.SenderID,
+				"votes", votes,
+			)
+		}
+		return
+	}
+	p.membership.MarkSuspect(msg.TargetID, p.config.SuspectTimeout, p.gossipDead)
 }
 
 // announceAlive kendimizin ALIVE olduğunu gossip ile yayar.

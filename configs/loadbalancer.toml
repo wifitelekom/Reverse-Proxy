@@ -1,0 +1,20 @@
+# Load balancer config (TOML).
+# To use, build with `-tags toml`:
+#   go build -tags toml ./cmd/loadbalancer
+#   ./loadbalancer -config configs/loadbalancer.toml
+listen      = ":8080"
+strategy    = "leastconn"
+gossip_addr = ":9000"
+node_id     = "loadbalancer"
+seed_nodes  = [":9001", ":9002", ":9003"]
+
+[protocol]
+interval         = "1s"
+ping_timeout     = "500ms"
+indirect_timeout = "1s"
+suspect_timeout  = "3s"
+indirect_nodes   = 3
+
+[logging]
+level  = "info"
+format = "json"

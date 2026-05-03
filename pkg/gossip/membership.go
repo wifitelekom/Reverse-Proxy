@@ -9,10 +9,15 @@ import (
 
 // nodeEntry iç temsil — suspectTimer da burada saklanır.
 // Dışarıya asla pointer verilmez, sadece NodeInfo kopyası döner.
+//
+// suspectConfirmers is the Lifeguard "Dogpile" vote set: each unique
+// confirmer ID counts as one independent suspicion. Cleared automatically
+// when the node is observed alive again or transitions to dead.
 type nodeEntry struct {
-	info          NodeInfo
-	suspectTimer  *time.Timer
-	suspectCancel func()
+	info              NodeInfo
+	suspectTimer      *time.Timer
+	suspectCancel     func()
+	suspectConfirmers map[string]bool
 }
 
 // MembershipList thread-safe SWIM üyelik tablosudur.
@@ -23,6 +28,12 @@ type MembershipList struct {
 	members map[string]*nodeEntry
 	localID string
 	logger  *slog.Logger
+
+	// metrics is non-nil; defaults to a no-op so emitObserved can fire
+	// without a branch in the hot path. State-change observations are
+	// always made AFTER ml.mu is released to avoid deadlocking against
+	// the metrics hook (which is itself lock-free, but defensive).
+	metrics MetricsHook
 }
 
 // NewMembershipList yeni bir MembershipList oluşturur.
@@ -31,7 +42,20 @@ func NewMembershipList(localID string, logger *slog.Logger) *MembershipList {
 		members: make(map[string]*nodeEntry),
 		localID: localID,
 		logger:  logger,
+		metrics: noopMetricsHook{},
 	}
+}
+
+// SetMetricsHook installs a metrics sink. Pass nil to restore the no-op.
+// State transitions detected after this call are observed via the hook.
+func (ml *MembershipList) SetMetricsHook(h MetricsHook) {
+	ml.mu.Lock()
+	defer ml.mu.Unlock()
+	if h == nil {
+		ml.metrics = noopMetricsHook{}
+		return
+	}
+	ml.metrics = h
 }
 
 // AddOrUpdate bir node'u ekler veya günceller.
@@ -42,41 +66,66 @@ func NewMembershipList(localID string, logger *slog.Logger) *MembershipList {
 //
 // Dönüş: true ise state değişti, false ise yoksayıldı.
 func (ml *MembershipList) AddOrUpdate(info NodeInfo) bool {
-	ml.mu.Lock()
-	defer ml.mu.Unlock()
+	// We do all critical-section work under the lock, capture what the
+	// metrics hook needs, then notify outside the lock. Avoids any chance
+	// of deadlock if a future hook implementation calls back into the
+	// membership list.
+	var (
+		accepted     bool
+		emitTrans    bool
+		fromState    string // "" if this is a join, else previous state name
+		toState      string
+	)
 
+	ml.mu.Lock()
+	hook := ml.metrics
 	existing, exists := ml.members[info.ID]
-	if !exists {
+	switch {
+	case !exists:
 		ml.members[info.ID] = &nodeEntry{info: info}
 		ml.logger.Info("node joined", "id", info.ID, "addr", info.Addr)
-		return true
-	}
+		accepted = true
+		emitTrans = true
+		fromState = "" // empty signals "new arrival" downstream
+		toState = info.State.String()
 
-	if info.Incarnation < existing.info.Incarnation {
-		return false // Stale bilgi
-	}
+	case info.Incarnation < existing.info.Incarnation:
+		// Stale bilgi — yoksay.
 
-	if info.Incarnation == existing.info.Incarnation {
-		// Aynı incarnation: daha kötü state kazanır (Dead > Suspect > Alive)
-		if info.State <= existing.info.State {
-			return false
+	case info.Incarnation == existing.info.Incarnation && info.State <= existing.info.State:
+		// Aynı incarnation, state aynı veya daha iyi — yoksay.
+
+	default:
+		// Alive geliyorsa aktif suspect timer'ı iptal et + Dogpile oylarını sıfırla
+		if info.State == StateAlive && existing.suspectCancel != nil {
+			existing.suspectCancel()
+			existing.suspectTimer = nil
+			existing.suspectCancel = nil
+			// Lifeguard: revival cancels prior suspect votes — a fresh
+			// suspicion in the future must accumulate confirmations from
+			// scratch.
+			existing.suspectConfirmers = nil
+		}
+		prev := existing.info.State
+		existing.info = info
+		ml.logger.Info("node updated",
+			"id", info.ID,
+			"state", info.State.String(),
+			"incarnation", info.Incarnation,
+		)
+		accepted = true
+		if prev != info.State {
+			emitTrans = true
+			fromState = prev.String()
+			toState = info.State.String()
 		}
 	}
+	ml.mu.Unlock()
 
-	// Alive geliyorsa aktif suspect timer'ı iptal et
-	if info.State == StateAlive && existing.suspectCancel != nil {
-		existing.suspectCancel()
-		existing.suspectTimer = nil
-		existing.suspectCancel = nil
+	if emitTrans {
+		hook.OnStateChange(info.ID, fromState, toState)
 	}
-
-	existing.info = info
-	ml.logger.Info("node updated",
-		"id", info.ID,
-		"state", info.State.String(),
-		"incarnation", info.Incarnation,
-	)
-	return true
+	return accepted
 }
 
 // MarkSuspect bir node'u suspect olarak işaretler.
@@ -89,13 +138,14 @@ func (ml *MembershipList) MarkSuspect(
 	deadCallback func(nodeID string),
 ) {
 	ml.mu.Lock()
-	defer ml.mu.Unlock()
-
+	hook := ml.metrics
 	entry, exists := ml.members[nodeID]
 	if !exists || entry.info.State >= StateSuspect {
-		return // Zaten suspect/dead ya da bilinmiyor
+		ml.mu.Unlock()
+		return
 	}
 
+	prev := entry.info.State
 	entry.info.State = StateSuspect
 	ml.logger.Warn("node suspect", "id", nodeID)
 
@@ -105,27 +155,95 @@ func (ml *MembershipList) MarkSuspect(
 	})
 	entry.suspectTimer = timer
 	entry.suspectCancel = func() { timer.Stop() }
+	ml.mu.Unlock()
+
+	hook.OnStateChange(nodeID, prev.String(), StateSuspect.String())
 }
 
 // markDead timer callback'ten çağrılır — ayrı lock alır.
 // Deadlock önlemi: callback lock dışında çağrılır.
 func (ml *MembershipList) markDead(nodeID string, callback func(string)) {
 	ml.mu.Lock()
+	hook := ml.metrics
 	entry, exists := ml.members[nodeID]
 	if !exists || entry.info.State == StateDead {
 		ml.mu.Unlock()
 		return
 	}
+	prev := entry.info.State
 	entry.info.State = StateDead
 	entry.suspectTimer = nil
 	entry.suspectCancel = nil
+	entry.suspectConfirmers = nil // Dogpile votes irrelevant once dead
 	ml.logger.Error("node dead", "id", nodeID)
 	ml.mu.Unlock()
 
-	// Callback lock dışında — deadlock riski yok
+	// Both notifications fire outside the lock to keep slow callbacks
+	// from blocking the membership table.
+	hook.OnStateChange(nodeID, prev.String(), StateDead.String())
 	if callback != nil {
 		callback(nodeID)
 	}
+}
+
+// ConfirmSuspect records a Lifeguard "Dogpile" vote and reschedules the
+// suspect timer using the supplied computeTimeout function.
+//
+//   - If the node is unknown or already Dead, this is a no-op (returns 0,false).
+//   - If the node is currently Alive, it transitions to Suspect.
+//   - confirmerID dedupes votes — a confirmer ID can vote at most once.
+//   - computeTimeout receives the current vote count and returns the timeout
+//     to apply; this lets the caller plug in the formula without leaking
+//     timing constants into the membership package.
+//
+// Returns the post-vote count and true on success.
+func (ml *MembershipList) ConfirmSuspect(
+	nodeID, confirmerID string,
+	computeTimeout func(votes int) time.Duration,
+	deadCallback func(string),
+) (int, bool) {
+	ml.mu.Lock()
+	hook := ml.metrics
+
+	entry, exists := ml.members[nodeID]
+	if !exists || entry.info.State == StateDead {
+		ml.mu.Unlock()
+		return 0, false
+	}
+
+	if entry.suspectConfirmers == nil {
+		entry.suspectConfirmers = make(map[string]bool)
+	}
+	entry.suspectConfirmers[confirmerID] = true
+	votes := len(entry.suspectConfirmers)
+
+	// Transition to Suspect on first vote.
+	transitioned := false
+	prevState := entry.info.State
+	if entry.info.State == StateAlive {
+		entry.info.State = StateSuspect
+		transitioned = true
+		ml.logger.Warn("node suspect (lifeguard)", "id", nodeID, "votes", votes)
+	}
+
+	timeout := computeTimeout(votes)
+
+	// Reschedule timer: cancel any existing one first.
+	if entry.suspectCancel != nil {
+		entry.suspectCancel()
+	}
+	timer := time.AfterFunc(timeout, func() {
+		ml.markDead(nodeID, deadCallback)
+	})
+	entry.suspectTimer = timer
+	entry.suspectCancel = func() { timer.Stop() }
+
+	ml.mu.Unlock()
+
+	if transitioned {
+		hook.OnStateChange(nodeID, prevState.String(), StateSuspect.String())
+	}
+	return votes, true
 }
 
 // GetAliveMembers load balancer için ALIVE node'ları döner.

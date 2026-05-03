@@ -1,0 +1,29 @@
+{
+  "listen": ":8080",
+  "strategy": "roundrobin",
+  "gossip_addr": ":9000",
+  "node_id": "loadbalancer",
+  "seed_nodes": [":9001", ":9002", ":9003"],
+
+  "protocol": {
+    "interval": "1s",
+    "ping_timeout": "500ms",
+    "indirect_timeout": "1s",
+    "suspect_timeout": "3s",
+    "indirect_nodes": 3,
+
+    "lifeguard_enabled": true,
+    "self_awareness_max": 8,
+    "ping_timeout_min": "500ms",
+    "ping_timeout_max": "4s",
+    "indirect_timeout_min": "1s",
+    "indirect_timeout_max": "8s",
+    "suspect_timeout_min": "3s",
+    "suspect_timeout_max": "24s"
+  },
+
+  "logging": {
+    "level": "info",
+    "format": "json"
+  }
+}

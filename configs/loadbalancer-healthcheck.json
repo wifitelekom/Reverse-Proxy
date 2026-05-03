@@ -1,0 +1,30 @@
+{
+  "listen": ":8080",
+  "strategy": "p2c",
+  "gossip_addr": ":9000",
+  "node_id": "loadbalancer",
+  "seed_nodes": [":9001", ":9002", ":9003"],
+
+  "protocol": {
+    "interval": "1s",
+    "ping_timeout": "500ms",
+    "indirect_timeout": "1s",
+    "suspect_timeout": "3s",
+    "indirect_nodes": 3
+  },
+
+  "health_check": {
+    "enabled": true,
+    "interval": "5s",
+    "timeout": "2s",
+    "path": "/health",
+    "healthy_threshold": 2,
+    "unhealthy_threshold": 3,
+    "degraded_latency": "1s"
+  },
+
+  "logging": {
+    "level": "info",
+    "format": "json"
+  }
+}

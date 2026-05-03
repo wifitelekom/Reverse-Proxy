@@ -1,0 +1,19 @@
+{
+  "id": "node-a",
+  "gossip_addr": ":9001",
+  "service_addr": ":8001",
+  "seed_nodes": [":9002", ":9003"],
+
+  "protocol": {
+    "interval": "1s",
+    "ping_timeout": "500ms",
+    "indirect_timeout": "1s",
+    "suspect_timeout": "3s",
+    "indirect_nodes": 3
+  },
+
+  "logging": {
+    "level": "info",
+    "format": "json"
+  }
+}
