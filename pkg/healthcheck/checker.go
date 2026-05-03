@@ -163,6 +163,22 @@ type noopHook struct{}
 
 func (noopHook) OnCheck(string, time.Duration) {}
 
+// callbackSlotCount caps the number of OnStatusChange goroutines that
+// can be in-flight concurrently. The audit's H-1 finding: a slow
+// user-supplied callback (e.g. one that does a synchronous HTTP call to
+// notify a webhook) would otherwise leak unboundedly under churn.
+//
+// 16 is intentionally generous for normal operation — a 100-node cluster
+// flapping aggressively rarely exceeds 5–10 concurrent transitions —
+// while still acting as a hard cap. When the cap is hit the
+// notification is dropped with a Warn-level log so operators can see
+// they're losing fidelity.
+//
+// Note: the alternative of running callbacks synchronously was rejected
+// because a single slow callback would back-pressure every per-tick
+// goroutine in checkAll, eventually starving the entire check loop.
+const callbackSlotCount = 16
+
 // Checker periodically probes a configurable set of HTTP endpoints and
 // classifies each as Healthy / Degraded / Unhealthy / Unknown.
 type Checker struct {
@@ -176,6 +192,12 @@ type Checker struct {
 
 	onChange StatusChangeFunc
 	hook     MetricsHook
+
+	// callbackSlots is a buffered-channel-as-semaphore. Sending an empty
+	// struct acquires a slot; receiving releases it. Try-send (with a
+	// default branch) lets us bound concurrency without blocking the
+	// check loop. See callbackSlotCount for the rationale.
+	callbackSlots chan struct{}
 }
 
 // NewChecker returns a Checker with the given config. The HTTP client is
@@ -197,10 +219,11 @@ func NewChecker(cfg Config, logger *slog.Logger) *Checker {
 				return http.ErrUseLastResponse
 			},
 		},
-		logger:  logger,
-		nodes:   make(map[string]*NodeHealth),
-		targets: make(map[string]string),
-		hook:    noopHook{},
+		logger:        logger,
+		nodes:         make(map[string]*NodeHealth),
+		targets:       make(map[string]string),
+		hook:          noopHook{},
+		callbackSlots: make(chan struct{}, callbackSlotCount),
 	}
 }
 
@@ -456,8 +479,40 @@ func (c *Checker) applyResult(nodeID string, elapsed time.Duration, code int, su
 	c.mu.Unlock()
 
 	if cb != nil && old != newStatus {
-		// Run callback in a goroutine so a slow listener doesn't stall
-		// the next per-tick check.
-		go cb(nodeID, old, newStatus)
+		c.fireStatusChange(cb, nodeID, old, newStatus)
+	}
+}
+
+// fireStatusChange dispatches a status-change notification to the
+// user-supplied callback in a bounded goroutine.
+//
+// The bounded channel acts as a counting semaphore: each goroutine
+// claims a slot before launching and releases it on exit. Try-send
+// (the default branch) means we never block the caller — when slots
+// are exhausted we drop the notification with a warn-level log so
+// operators can see they're losing fidelity. The goroutine itself
+// guarantees the slot is released even if the user callback panics.
+func (c *Checker) fireStatusChange(cb StatusChangeFunc, nodeID string, old, new Status) {
+	select {
+	case c.callbackSlots <- struct{}{}:
+		go func() {
+			defer func() {
+				<-c.callbackSlots
+				// Recover from a panicking user callback so we don't
+				// take down the whole process. The slot is already
+				// released by the deferred receive above.
+				if r := recover(); r != nil {
+					c.logger.Error("status-change callback panicked",
+						"node", nodeID, "panic", r)
+				}
+			}()
+			cb(nodeID, old, new)
+		}()
+	default:
+		// All slots in use — a slow callback is back-pressuring. Drop
+		// this notification rather than leak another goroutine.
+		c.logger.Warn("status-change callback slots saturated; dropping notification",
+			"node", nodeID, "from", old.String(), "to", new.String(),
+			"slot_capacity", callbackSlotCount)
 	}
 }

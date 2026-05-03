@@ -310,14 +310,18 @@ func (p *Protocol) handleMessages(ctx context.Context) {
 			if !ok {
 				return // channel kapatıldı
 			}
-			p.processMessage(received)
+			p.processMessage(ctx, received)
 		}
 	}
 }
 
 // processMessage gelen mesaj türüne göre dispatch eder.
 // Piggyback üyelik bilgisi her mesajda önce işlenir.
-func (p *Protocol) processMessage(received ReceivedMessage) {
+//
+// ctx is propagated to handlers that spawn long-lived goroutines (notably
+// handlePingReq). Without it, those goroutines would survive a protocol
+// shutdown for up to IndirectTimeout — the audit's H-2 finding.
+func (p *Protocol) processMessage(ctx context.Context, received ReceivedMessage) {
 	msg := received.Msg
 	p.metrics.OnMessageReceived(string(msg.Type))
 
@@ -340,7 +344,7 @@ func (p *Protocol) processMessage(received ReceivedMessage) {
 	case MsgAck:
 		p.handleAck(msg)
 	case MsgPingReq:
-		p.handlePingReq(msg)
+		p.handlePingReq(ctx, msg)
 	case MsgDead:
 		p.handleDeadMsg(msg)
 	case MsgSuspect:
@@ -380,7 +384,18 @@ func (p *Protocol) handleAck(msg GossipMessage) {
 
 // handlePingReq: aracı olarak hedef node'a ping at, sonucu requester'a ilet.
 // Ayrı goroutine'da çalışır — blocking ping içerir.
-func (p *Protocol) handlePingReq(msg GossipMessage) {
+//
+// The spawned goroutine waits up to IndirectTimeout (or its scaled
+// Lifeguard equivalent — up to 8s by default) for the target's ACK.
+// Without ctx-awareness, a protocol shutdown during that window would
+// leave the goroutine running until its timer fires, holding a
+// pendingPings entry, a UDP socket reference, and a goroutine slot.
+// On a busy cluster being shut down hundreds of these can be in flight.
+//
+// We honor ctx by adding ctx.Done() to the select. Cancellation drains
+// the goroutine within microseconds of the ctx flip, regardless of
+// IndirectTimeout configuration.
+func (p *Protocol) handlePingReq(ctx context.Context, msg GossipMessage) {
 	go func() {
 		// Hedef node adresini bul
 		target, found := p.membership.GetMember(msg.TargetID)
@@ -410,11 +425,15 @@ func (p *Protocol) handlePingReq(msg GossipMessage) {
 			return
 		}
 
-		// T_indirect timeout bekle
+		// T_indirect timeout bekle, OR ctx iptal edilirse erken çık.
 		timer := time.NewTimer(p.config.IndirectTimeout)
 		defer timer.Stop()
 
 		select {
+		case <-ctx.Done():
+			// Protocol shutdown — bail out instantly. Skipping the ACK
+			// forward is correct: the requester is being torn down too.
+			return
 		case <-replyCh:
 			// Hedef cevap verdi — requester'a ACK ilet
 			ackMsg := GossipMessage{
