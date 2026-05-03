@@ -8,3 +8,5 @@ tasks/
 /loadbalancer
 /node
 /simulator
+.DS_Store
+.idea/
