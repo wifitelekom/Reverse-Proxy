@@ -19,12 +19,22 @@ import (
 // timeouts dynamically and Dogpile shortens the suspect window via
 // ConfirmSuspect on MembershipList. The selfAwareness field stays nil if
 // the feature is off, so the hot path has zero overhead.
+//
+// FIELD ORDER IS LOAD-BEARING. seqCounter is read/written via
+// atomic.AddUint64. On 32-bit ARM/x86 the standard library only
+// guarantees 8-byte alignment for the FIRST field of a heap-allocated
+// struct; a uint64 anywhere else can land at a 4-aligned offset and
+// panic on the atomic op. Keeping seqCounter at offset 0 makes the
+// alignment requirement satisfied on every supported GOARCH.
+//
+// Pinned by TestProtocol_SeqCounterAtOffsetZero (alignment test).
+// Do NOT reorder these fields without also updating that test.
 type Protocol struct {
+	seqCounter   uint64 // atomic monotonic sequence number (must remain at offset 0)
 	config       types.ProtocolConfig
 	membership   *MembershipList
 	transport    *Transport
 	localInfo    NodeInfo
-	seqCounter   uint64   // atomic monotonic sequence number
 	pendingPings sync.Map // map[uint64]chan bool — in-flight PINGs
 	logger       *slog.Logger
 

@@ -245,3 +245,48 @@ func StatusClass(code int) string {
 		return "unknown"
 	}
 }
+
+// knownHTTPMethods is the allowlist of HTTP method tokens that may
+// appear directly as a Prometheus `method` label. Anything outside
+// this set is bucketed into "unknown" by MethodLabel — without
+// the bucket, an attacker could send arbitrary tokens
+// (e.g. "HACK /path HTTP/1.1") and create unbounded metric series,
+// blowing up the registry.
+//
+// The allowlist tracks RFC 9110 §9 (the formerly RFC 7231 list) plus
+// the WebDAV verbs that appear in practice. Adding a new entry is
+// cheap; removing one risks losing a customer's legitimate traffic.
+var knownHTTPMethods = map[string]struct{}{
+	"GET":     {},
+	"HEAD":    {},
+	"POST":    {},
+	"PUT":     {},
+	"DELETE":  {},
+	"PATCH":   {},
+	"OPTIONS": {},
+	"TRACE":   {},
+	"CONNECT": {},
+	// WebDAV — common enough to whitelist; remove if you prefer strict RFC 9110.
+	"PROPFIND":  {},
+	"PROPPATCH": {},
+	"MKCOL":     {},
+	"COPY":      {},
+	"MOVE":      {},
+	"LOCK":      {},
+	"UNLOCK":    {},
+}
+
+// MethodLabel normalises an HTTP method for use as a Prometheus label.
+// Methods in the IETF/IANA-curated allowlist pass through unchanged;
+// anything else is bucketed into "unknown" so attacker-controlled
+// request lines cannot inflate the registry's series count.
+//
+// Empty input also returns "unknown" — defensive against handlers
+// that haven't populated Request.Method (none in our hot path do,
+// but the contract is robust to misuse).
+func MethodLabel(method string) string {
+	if _, ok := knownHTTPMethods[method]; ok {
+		return method
+	}
+	return "unknown"
+}

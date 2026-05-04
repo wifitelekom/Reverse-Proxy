@@ -445,7 +445,11 @@ func (lb *LoadBalancer) handleRequest(w http.ResponseWriter, r *http.Request) {
 			statusCode = http.StatusBadGateway
 		}
 		class := metrics.StatusClass(statusCode)
-		lb.metrics.RequestsTotal.WithLabelValues(selected.NodeID, class, r.Method).Inc()
+		// MethodLabel buckets non-standard HTTP method tokens into
+		// "unknown" so an attacker-controlled request line can't
+		// inflate the metric registry's cardinality.
+		method := metrics.MethodLabel(r.Method)
+		lb.metrics.RequestsTotal.WithLabelValues(selected.NodeID, class, method).Inc()
 		lb.metrics.RequestDuration.WithLabelValues(selected.NodeID, class).Observe(elapsed.Seconds())
 	}
 }

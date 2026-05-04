@@ -35,6 +35,78 @@ func TestStatusClass(t *testing.T) {
 }
 
 // =====================================================================
+// MethodLabel: cardinality discipline.
+// =====================================================================
+
+// TestMethodLabel_AllowedPassThrough verifies every method on the
+// allowlist round-trips unchanged. If we accidentally drop one of
+// these, customer dashboards lose data silently.
+func TestMethodLabel_AllowedPassThrough(t *testing.T) {
+	allowed := []string{
+		"GET", "HEAD", "POST", "PUT", "DELETE",
+		"PATCH", "OPTIONS", "TRACE", "CONNECT",
+		// WebDAV verbs we whitelisted — change with care.
+		"PROPFIND", "PROPPATCH", "MKCOL", "COPY", "MOVE", "LOCK", "UNLOCK",
+	}
+	for _, m := range allowed {
+		if got := MethodLabel(m); got != m {
+			t.Errorf("MethodLabel(%q) = %q, want pass-through", m, got)
+		}
+	}
+}
+
+// TestMethodLabel_UnknownBucketed proves arbitrary tokens collapse to
+// "unknown". This is the cardinality-DoS defense: an attacker sending
+// `HACK /path HTTP/1.1` would otherwise create a new metric series
+// per unique token.
+func TestMethodLabel_UnknownBucketed(t *testing.T) {
+	bogus := []string{
+		"HACK",         // entirely fabricated
+		"get",          // wrong case (HTTP methods are case-sensitive per RFC)
+		"GET ",         // trailing space — common smuggling probe shape
+		" GET",         // leading whitespace
+		"HACK123",      // junk
+		"PROPFINDX",    // looks like a real verb but isn't
+		"\u0000",       // NUL byte
+		strings.Repeat("A", 256), // long-string overflow attempt
+	}
+	for _, m := range bogus {
+		if got := MethodLabel(m); got != "unknown" {
+			t.Errorf("MethodLabel(%q) = %q, want %q", m, got, "unknown")
+		}
+	}
+}
+
+// TestMethodLabel_EmptyIsUnknown — defensive against a zero-value
+// http.Request that somehow bypasses the standard parser.
+func TestMethodLabel_EmptyIsUnknown(t *testing.T) {
+	if got := MethodLabel(""); got != "unknown" {
+		t.Errorf("MethodLabel(\"\") = %q, want %q", got, "unknown")
+	}
+}
+
+// TestMethodLabel_Cardinality is the practical bound check: feeding
+// 1000 random method tokens into the labeller must yield at most
+// (allowlist size + 1) distinct outputs. If this ever expands, we've
+// regressed the cardinality bound.
+func TestMethodLabel_Cardinality(t *testing.T) {
+	seen := make(map[string]struct{})
+	// 1000 attacker-shaped tokens.
+	for i := 0; i < 1000; i++ {
+		m := strings.Repeat("X", i%64+1) + string(rune('A'+(i%26)))
+		seen[MethodLabel(m)] = struct{}{}
+	}
+	// Plus all the legitimate ones, to confirm pass-through coexists.
+	for m := range knownHTTPMethods {
+		seen[MethodLabel(m)] = struct{}{}
+	}
+	expectedMax := len(knownHTTPMethods) + 1 // +1 for "unknown"
+	if len(seen) > expectedMax {
+		t.Errorf("cardinality exceeded bound: got %d, want <= %d", len(seen), expectedMax)
+	}
+}
+
+// =====================================================================
 // Metrics struct construction + collector registration
 // =====================================================================
 
