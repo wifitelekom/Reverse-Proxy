@@ -1,0 +1,85 @@
+name: test
+
+# Why this workflow exists
+# ------------------------
+# The whole project's correctness story rests on two things:
+#   1. The race detector staying clean. We have shared atomic state across
+#      gossip, health-check, and load-balancer goroutines; a race that
+#      sneaks past local review can sit dormant until production traffic.
+#   2. Both build-tag flavours compiling and passing. The TOML config
+#      loader lives behind `-tags toml`; without that build path in CI
+#      a refactor to the loader could land green and break operators.
+#
+# Two jobs, run in parallel: default and toml. Each shells out the same
+# `-race -count=1` test invocation so flakes don't hide behind a cache.
+
+on:
+  push:
+    branches: [master, main, "claude/**"]
+  pull_request:
+    branches: [master, main]
+
+# Cancel superseded runs on the same ref. PR pushes are noisy; only the
+# latest commit's result matters for merge gating.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: race (${{ matrix.tags == '' && 'default' || matrix.tags }})
+    runs-on: ubuntu-latest
+    strategy:
+      # Don't fail-fast: if the toml flavour fails we still want to see the
+      # default flavour's result, and vice versa. Helps triage.
+      fail-fast: false
+      matrix:
+        tags:
+          - ""      # default build
+          - "toml"  # TOML config loader path
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          # Track go.mod's declared version exactly so a Go bump in the
+          # repo automatically bumps CI without a workflow edit.
+          go-version-file: go.mod
+          cache: true
+
+      - name: Verify go.mod is tidy
+        # `go mod tidy` is cheap; running it in CI catches stray indirect
+        # dependencies before they hit master. The diff guard ensures we
+        # fail loudly rather than silently rewriting go.sum on the runner.
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
+
+      - name: gofmt
+        # Project standard: gofmt-clean. A single mis-formatted file fails
+        # CI rather than being silently rewritten by an editor on someone
+        # else's machine later.
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt found unformatted files:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go vet
+        # Static analysis catches a different class of bug than the race
+        # detector — printf misuse, unreachable code, lock-by-value, etc.
+        # We pass the same build tags so vet sees the same files as test.
+        run: go vet -tags="${{ matrix.tags }}" ./...
+
+      - name: go test -race
+        # -count=1 disables the test cache — flakes can otherwise hide
+        # behind a green cached entry and never re-run on CI.
+        # -timeout 5m bounds the worst-case (a deadlock won't pin a runner).
+        run: go test -race -count=1 -timeout 5m -tags="${{ matrix.tags }}" ./...
