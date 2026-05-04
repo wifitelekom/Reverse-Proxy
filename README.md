@@ -224,6 +224,30 @@ The admin paths share a token-bucket rate limiter (10 rps, burst 20)
 when metrics are enabled, so a runaway scraper can't compete with
 proxied traffic for goroutine slots.
 
+#### Access control
+
+By default the admin paths are open to anyone who can reach the listen
+port. Production deployments should restrict access via the `admin`
+config block:
+
+```json
+{
+  "admin": {
+    "allow_cidrs":   ["127.0.0.1/32", "10.0.0.0/8"],
+    "bearer_token":  "long-random-string"
+  }
+}
+```
+
+- `allow_cidrs` matches against `r.RemoteAddr`. Empty disables the
+  CIDR check. **Not** honoured against `X-Forwarded-For` — if a
+  reverse proxy fronts the LB, allowlist the proxy's address.
+- `bearer_token` requires `Authorization: Bearer <token>` (case-
+  sensitive scheme; constant-time compare).
+- When both are set, BOTH must pass — defense in depth.
+- An unauthorised caller gets a 404 (path-existence is not confirmed)
+  and does not consume rate-limit budget.
+
 ## Metrics
 
 Twelve subsystem counters plus the standard Go runtime / process

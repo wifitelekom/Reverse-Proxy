@@ -192,6 +192,31 @@ type HealthCheckConfig struct {
 	DegradedLatency    time.Duration // 2xx above this counts as Degraded
 }
 
+// AdminConfig restricts who can reach the LB's /_lb/* admin endpoints
+// (health dump, metrics scrape). Both controls are off by default —
+// preserving the historical "anyone on the listen port can scrape"
+// behaviour — and any combination is valid:
+//
+//   - AllowCIDRs only: source IP must fall in one of the listed CIDRs.
+//   - BearerToken only: request must carry `Authorization: Bearer <t>`.
+//   - Both set: ALL configured controls must pass (defense in depth).
+//   - Neither set: open access (back-compat).
+//
+// Practical guidance: behind nginx (the deployment shape the README
+// recommends) the only client reaching the LB on the data port IS
+// nginx — set AllowCIDRs to nginx's IP and the metrics scraper's IP,
+// or front the admin paths off nginx's auth tier and rely on token.
+//
+// Note: AllowCIDRs is matched against r.RemoteAddr. If a reverse
+// proxy fronts the LB, RemoteAddr is the proxy's address, not the
+// real client's — set CIDRs accordingly. We deliberately do NOT
+// honour X-Forwarded-For for admin auth: the trust chain there is
+// fragile and getting it wrong silently bypasses access control.
+type AdminConfig struct {
+	AllowCIDRs  []string // CIDR allowlist matched against r.RemoteAddr
+	BearerToken string   // shared secret in `Authorization: Bearer ...`
+}
+
 // LBConfig holds the load balancer configuration.
 //
 // ShutdownTimeout bounds graceful shutdown when the parent context is
@@ -212,4 +237,5 @@ type LBConfig struct {
 	HealthCheck     HealthCheckConfig
 	TLS             TLSConfig
 	BackendTLS      BackendTLSConfig
+	Admin           AdminConfig
 }

@@ -131,6 +131,14 @@ type HealthCheckCfg struct {
 	DegradedLatency    Duration `json:"degraded_latency"    toml:"degraded_latency"`
 }
 
+// AdminCfg is the file-loadable counterpart of types.AdminConfig.
+// Both fields default to zero (off) — opting in requires an explicit
+// declaration in the config file or env var.
+type AdminCfg struct {
+	AllowCIDRs  []string `json:"allow_cidrs"  toml:"allow_cidrs"`
+	BearerToken string   `json:"bearer_token" toml:"bearer_token"`
+}
+
 // NodeConfig is the file-loadable config for a backend node.
 type NodeConfig struct {
 	ID              string      `json:"id"               toml:"id"`
@@ -154,6 +162,7 @@ type LBConfig struct {
 	HealthCheck     HealthCheckCfg `json:"health_check"      toml:"health_check"`
 	TLS             TLSCfg         `json:"tls"               toml:"tls"`
 	BackendTLS      BackendTLSCfg  `json:"backend_tls"       toml:"backend_tls"`
+	Admin           AdminCfg       `json:"admin"             toml:"admin"`
 	Logging         LoggingCfg     `json:"logging"           toml:"logging"`
 }
 
@@ -286,6 +295,18 @@ func (c LBConfig) ToInternal() types.LBConfig {
 		HealthCheck:     c.HealthCheck.ToInternal(),
 		TLS:             c.TLS.ToInternal(),
 		BackendTLS:      c.BackendTLS.ToInternal(),
+		Admin:           c.Admin.ToInternal(),
+	}
+}
+
+// ToInternal converts an AdminCfg to the runtime types.AdminConfig.
+// Empty slices and strings are preserved verbatim — the LB treats both
+// as "feature disabled" so back-compat with configs that omit the
+// admin section is automatic.
+func (a AdminCfg) ToInternal() types.AdminConfig {
+	return types.AdminConfig{
+		AllowCIDRs:  a.AllowCIDRs,
+		BearerToken: a.BearerToken,
 	}
 }
 

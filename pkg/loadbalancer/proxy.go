@@ -3,6 +3,7 @@ package loadbalancer
 import (
 	"bufio"
 	"context"
+	"crypto/subtle"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
@@ -129,6 +130,18 @@ type LoadBalancer struct {
 	// scrapers from competing with proxied traffic. Nil disables the
 	// limiter (the historical default).
 	adminLimiter *rate.Limiter
+
+	// adminAllowedNets is the parsed CIDR allowlist for /_lb/* access.
+	// Empty slice means "no CIDR restriction"; nil and empty are
+	// equivalent. Built once at construction so the request path stays
+	// allocation-free.
+	adminAllowedNets []*net.IPNet
+
+	// adminBearerToken is the optional shared secret expected in the
+	// Authorization header on admin requests. Empty string means
+	// "no token check". Compared in constant time to defeat timing
+	// oracles.
+	adminBearerToken string
 }
 
 // AdminRateLimit are the defaults applied when the LB enables rate
@@ -253,6 +266,28 @@ func NewLoadBalancer(
 		if cfg.BackendTLS.SkipVerify {
 			logger.Warn("backend TLS configured with InsecureSkipVerify — DO NOT USE IN PRODUCTION")
 		}
+	}
+
+	// Admin access control. Pre-parse CIDRs so a malformed entry fails
+	// startup rather than silently disabling the gate (an empty parsed
+	// list looks the same as "feature off"). An operator who typos a
+	// CIDR deserves a loud error, not a security regression.
+	for _, raw := range cfg.Admin.AllowCIDRs {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		_, n, err := net.ParseCIDR(raw)
+		if err != nil {
+			return nil, fmt.Errorf("admin: bad CIDR %q: %w", raw, err)
+		}
+		lb.adminAllowedNets = append(lb.adminAllowedNets, n)
+	}
+	lb.adminBearerToken = cfg.Admin.BearerToken
+	if len(lb.adminAllowedNets) > 0 || lb.adminBearerToken != "" {
+		logger.Info("admin endpoints access-controlled",
+			"cidr_rules", len(lb.adminAllowedNets),
+			"bearer_token", lb.adminBearerToken != "")
 	}
 
 	return lb, nil
@@ -574,11 +609,25 @@ func (lb *LoadBalancer) filterHealthy(backends []*Backend) []*Backend {
 //   - /_lb/health   JSON snapshot of every tracked node's health
 //   - /_lb/metrics  Prometheus exposition (when metrics enabled)
 //
+// Order of gates:
+//  1. Access control (CIDR + bearer) — runs first so an unauthorised
+//     client cannot consume rate-limit budget and starve legitimate
+//     scrapers.
+//  2. Rate limit — applies to authorised callers only.
+//  3. Path dispatch.
+//
 // All admin paths share a single rate limiter so a runaway scrape loop
 // can't compete with real traffic for goroutine slots. Limiter is nil
 // when rate-limiting is disabled — preserves the historical "always
 // answer admin requests" behavior.
 func (lb *LoadBalancer) handleAdmin(w http.ResponseWriter, r *http.Request) {
+	if !lb.authorizeAdmin(r) {
+		// 404 rather than 401/403 — refuses to confirm the path even
+		// exists to an unauthorised caller. The legitimate operator
+		// already knows the path and won't be confused.
+		http.NotFound(w, r)
+		return
+	}
 	if lb.adminLimiter != nil && !lb.adminLimiter.Allow() {
 		w.Header().Set("Retry-After", "1")
 		http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
@@ -592,6 +641,74 @@ func (lb *LoadBalancer) handleAdmin(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+// authorizeAdmin enforces the configured admin access controls.
+// Returns true when the request passes ALL configured checks; an
+// empty configuration (no CIDRs, no token) is "off" and always
+// returns true (back-compat with deployments that haven't opted in).
+//
+// The CIDR check uses the parsed r.RemoteAddr — NOT X-Forwarded-For.
+// Honouring XFF here would silently widen access to anyone who can
+// inject a header, which is exactly the kind of footgun this control
+// exists to close. Operators behind a reverse proxy must allowlist
+// the proxy's address.
+//
+// Token comparison uses subtle.ConstantTimeCompare to defeat the
+// timing oracle that a naive == would expose. Length mismatches are
+// folded into the comparison by padding the input — otherwise a
+// short input would short-circuit and reveal the expected length.
+func (lb *LoadBalancer) authorizeAdmin(r *http.Request) bool {
+	if len(lb.adminAllowedNets) > 0 {
+		host, _, err := net.SplitHostPort(r.RemoteAddr)
+		if err != nil {
+			// RemoteAddr is supposed to be host:port. If the server
+			// gave us something else, refuse — better safe than sorry.
+			return false
+		}
+		ip := net.ParseIP(host)
+		if ip == nil {
+			return false
+		}
+		allowed := false
+		for _, n := range lb.adminAllowedNets {
+			if n.Contains(ip) {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			return false
+		}
+	}
+	if lb.adminBearerToken != "" {
+		// Expected header form: `Authorization: Bearer <token>`.
+		// CutPrefix gates BOTH the scheme presence and the value
+		// extraction — if the header is missing, empty, or uses a
+		// different scheme (e.g. Basic, lowercase "bearer"), ok is
+		// false and we reject. TrimPrefix would silently accept a
+		// bare token without the scheme, which is wrong.
+		const prefix = "Bearer "
+		token, ok := strings.CutPrefix(r.Header.Get("Authorization"), prefix)
+		if !ok {
+			return false
+		}
+		// Length-pad before comparing so timing reveals nothing about
+		// the expected length. ConstantTimeCompare returns 1 only for
+		// equal-length, equal-content arguments.
+		expected := []byte(lb.adminBearerToken)
+		got := []byte(token)
+		if len(got) != len(expected) {
+			// Constant-time compare against expected anyway, then
+			// reject. Avoids a short-circuit timing leak.
+			subtle.ConstantTimeCompare(expected, expected)
+			return false
+		}
+		if subtle.ConstantTimeCompare(got, expected) != 1 {
+			return false
+		}
+	}
+	return true
 }
 
 // handleMetricsDump serves the Prometheus /metrics endpoint or returns
