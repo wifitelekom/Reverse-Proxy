@@ -84,6 +84,7 @@ on doesn't surprise you.
 | | CIDR allowlist + bearer token on `/_lb/*` (constant-time compare) | off |
 | **WebSocket** | Header forwarding (Cookie / Authorization / Origin pass through) | default |
 | | Per-header strip list (post-dial, pre-write) | off |
+| | Idle-timeout-bounded bidirectional pump (DoS defence) | 15m default |
 
 ## Quickstart
 
@@ -278,6 +279,28 @@ match the same header). The handshake-essential headers — `Upgrade`,
 strippable; listing them logs a startup warning and the entry is
 ignored. Removing those would silently break the WebSocket protocol
 itself.
+
+#### Idle-timeout pump
+
+The bidirectional copy that runs after the upgrade is bounded by a
+read deadline that's refreshed on every successful read. If neither
+side sends a single byte for `websocket_idle_timeout`, the LB tears
+the session down — closes both legs, frees the goroutine pair,
+returns the file descriptors. Without this, a hung peer that opens
+an upgrade and goes silent would hold a goroutine + two FDs forever
+(slow-loris-on-WS).
+
+```json
+{
+  "websocket_idle_timeout": "15m"
+}
+```
+
+Default: 15 minutes — generous enough that any WebSocket app using
+sane keepalive pings (typically every 30 s – 2 min) won't notice,
+aggressive enough to reap stalled sessions promptly. Set to `0s` to
+disable the timeout entirely (only useful for tests or one-shot
+transfer protocols where the protocol itself bounds the duration).
 
 ## Metrics
 

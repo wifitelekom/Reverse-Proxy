@@ -149,6 +149,12 @@ type LoadBalancer struct {
 	// are stored in textproto canonical form so MIMEHeader operations
 	// hit them directly.
 	wsStripHeaders map[string]struct{}
+
+	// wsIdleTimeout is the per-direction read-deadline refreshed on
+	// every successful read in the WebSocket pump. Zero disables the
+	// timeout — useful for tests and one-shot transfer protocols, but
+	// production should leave the default in place.
+	wsIdleTimeout time.Duration
 }
 
 // AdminRateLimit are the defaults applied when the LB enables rate
@@ -295,6 +301,14 @@ func NewLoadBalancer(
 		logger.Info("admin endpoints access-controlled",
 			"cidr_rules", len(lb.adminAllowedNets),
 			"bearer_token", lb.adminBearerToken != "")
+	}
+
+	// WebSocket idle timeout — applies to every byte-pump direction
+	// after the upgrade. Zero (and negative) disables. The runtime
+	// layer treats 0 as "no deadline"; we let negatives through too
+	// so test code can write `WebSocketIdleTimeout: -1` for clarity.
+	if cfg.WebSocketIdleTimeout > 0 {
+		lb.wsIdleTimeout = cfg.WebSocketIdleTimeout
 	}
 
 	// WebSocket header strip list. Build a canonical set so the per-

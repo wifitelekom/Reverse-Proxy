@@ -255,4 +255,22 @@ type LBConfig struct {
 	// break the handshake itself, so we ignore those entries with a
 	// warning at startup.
 	WebSocketStripHeaders []string
+
+	// WebSocketIdleTimeout bounds the maximum interval between bytes on
+	// a hijacked WebSocket session. If neither the client nor the
+	// backend sends a single byte in this window, the LB tears the
+	// session down — closes both sides, frees the goroutine pair, and
+	// returns the file descriptors.
+	//
+	// This is the DoS defence for the post-hijack pump: without it, a
+	// client that opens an upgrade and never sends or reads holds a
+	// goroutine + two FDs forever (slow-loris-on-WS).
+	//
+	// Default 15 minutes — generous enough that any WebSocket app
+	// using sane keepalive pings (typically every 30s–2min) won't
+	// notice, aggressive enough to reap stalled sessions promptly.
+	// Set to 0 to disable the timeout entirely (NOT recommended in
+	// production; only useful for edge cases like one-shot file
+	// transfers where the protocol itself bounds the duration).
+	WebSocketIdleTimeout time.Duration
 }

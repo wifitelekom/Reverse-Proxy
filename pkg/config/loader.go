@@ -53,6 +53,17 @@ func LoadLB(path string) (LBConfig, error) {
 	if cfg.ShutdownTimeout.Duration == 0 {
 		cfg.ShutdownTimeout = DefaultLBConfig().ShutdownTimeout
 	}
+	// WebSocketIdleTimeout: a zero-value file entry must inherit the
+	// default rather than be interpreted as "infinite". Operators who
+	// genuinely want the timeout off must say so explicitly via a
+	// negative duration (handled below).
+	if cfg.WebSocketIdleTimeout.Duration == 0 {
+		cfg.WebSocketIdleTimeout = DefaultLBConfig().WebSocketIdleTimeout
+	} else if cfg.WebSocketIdleTimeout.Duration < 0 {
+		// Convention: negative => disabled. Normalise to zero before
+		// passing to the runtime layer (which treats 0 as "off").
+		cfg.WebSocketIdleTimeout = Duration{0}
+	}
 	return cfg, nil
 }
 

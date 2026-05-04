@@ -170,6 +170,11 @@ type LBConfig struct {
 	// the full contract; empty list preserves the historical
 	// pass-everything-through behaviour.
 	WebSocketStripHeaders []string `json:"websocket_strip_headers" toml:"websocket_strip_headers"`
+
+	// WebSocketIdleTimeout bounds the gap between bytes on a hijacked
+	// WS session. See types.LBConfig.WebSocketIdleTimeout for the full
+	// contract. Defaults to 15m via DefaultLBConfig.
+	WebSocketIdleTimeout Duration `json:"websocket_idle_timeout" toml:"websocket_idle_timeout"`
 }
 
 // DefaultProtocolCfg returns production-safe SWIM defaults.
@@ -260,6 +265,10 @@ func DefaultLBConfig() LBConfig {
 		TLS:             DefaultTLSCfg(),
 		BackendTLS:      DefaultBackendTLSCfg(),
 		Logging:         DefaultLoggingCfg(),
+		// 15 minutes is generous for any reasonable WS keepalive cadence
+		// while still reaping abandoned sessions before they pile up. See
+		// types.LBConfig.WebSocketIdleTimeout for the rationale.
+		WebSocketIdleTimeout: Duration{15 * time.Minute},
 	}
 }
 
@@ -303,6 +312,7 @@ func (c LBConfig) ToInternal() types.LBConfig {
 		BackendTLS:            c.BackendTLS.ToInternal(),
 		Admin:                 c.Admin.ToInternal(),
 		WebSocketStripHeaders: c.WebSocketStripHeaders,
+		WebSocketIdleTimeout:  c.WebSocketIdleTimeout.Duration,
 	}
 }
 

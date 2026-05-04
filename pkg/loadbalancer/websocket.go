@@ -145,13 +145,20 @@ func (lb *LoadBalancer) proxyWebSocket(w http.ResponseWriter, r *http.Request, b
 
 	// Stream both directions concurrently. Whichever side closes first
 	// triggers cleanup of the other.
+	//
+	// We do NOT use io.Copy: a hung peer that holds the socket open
+	// without sending or reading would leave the unbounded copy
+	// goroutine resident forever, leaking goroutines and FDs. Our
+	// pumpWithIdleTimeout refreshes a read deadline on every successful
+	// read so an idle session times out cleanly. Zero timeout disables
+	// the deadline (back-compat / opt-out path).
 	errCh := make(chan error, 2)
 	var wg sync.WaitGroup
 	wg.Add(2)
 
 	go func() {
 		defer wg.Done()
-		_, err := io.Copy(backendConn, clientConn)
+		_, err := pumpWithIdleTimeout(backendConn, clientConn, lb.wsIdleTimeout)
 		errCh <- err
 		// Closing the backend write side propagates EOF so the other
 		// goroutine's Read can complete promptly.
@@ -161,7 +168,7 @@ func (lb *LoadBalancer) proxyWebSocket(w http.ResponseWriter, r *http.Request, b
 	}()
 	go func() {
 		defer wg.Done()
-		_, err := io.Copy(clientConn, backendConn)
+		_, err := pumpWithIdleTimeout(clientConn, backendConn, lb.wsIdleTimeout)
 		errCh <- err
 		if cw, ok := clientConn.(closeWriter); ok {
 			cw.CloseWrite()
@@ -187,6 +194,57 @@ func (lb *LoadBalancer) proxyWebSocket(w http.ResponseWriter, r *http.Request, b
 // useful for half-close graceful shutdowns of streaming connections.
 type closeWriter interface {
 	CloseWrite() error
+}
+
+// pumpWithIdleTimeout copies src→dst with an idle timeout: between any
+// two consecutive bytes the gap may not exceed `idle`. After every
+// successful read we extend src's read deadline by another full window;
+// after `idle` of true silence the next Read errors with i/o timeout
+// and the pump returns, letting the caller tear the session down.
+//
+// When idle == 0 the function falls through to a vanilla io.Copy — the
+// historical, unbounded behaviour. Callers opt in by configuring a
+// non-zero WebSocketIdleTimeout.
+//
+// We use 32 KiB as the buffer size — same as io.Copy's internal default
+// and a sweet spot for kernel page-aligned reads on Linux/macOS. Larger
+// buffers don't help WebSocket frames (typically <16 KiB after
+// fragmentation) and just cost RSS.
+func pumpWithIdleTimeout(dst io.Writer, src net.Conn, idle time.Duration) (int64, error) {
+	if idle <= 0 {
+		return io.Copy(dst, src)
+	}
+	const bufSize = 32 * 1024
+	buf := make([]byte, bufSize)
+	var total int64
+	for {
+		// Refresh the read deadline before EVERY Read. Without the
+		// refresh, a long-lived session that goes quiet for slightly
+		// less than the timeout would never get the deadline pushed
+		// forward and would terminate after the first window — the
+		// opposite of what we want.
+		if err := src.SetReadDeadline(time.Now().Add(idle)); err != nil {
+			return total, err
+		}
+		n, err := src.Read(buf)
+		if n > 0 {
+			total += int64(n)
+			if _, werr := dst.Write(buf[:n]); werr != nil {
+				return total, werr
+			}
+		}
+		if err != nil {
+			// Match io.Copy's contract: clean EOF is not an error.
+			// Callers distinguish "session ended normally" from
+			// "session ended badly" by inspecting err being non-nil,
+			// so leaking EOF up would misclassify every healthy WS
+			// close as an anomaly.
+			if errors.Is(err, io.EOF) {
+				return total, nil
+			}
+			return total, err
+		}
+	}
 }
 
 // errHijackUnsupported is returned by proxyWebSocket when the underlying
