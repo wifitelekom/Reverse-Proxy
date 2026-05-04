@@ -166,10 +166,10 @@ func (ml *MembershipList) AddOrUpdate(info NodeInfo) bool {
 	// of deadlock if a future hook implementation calls back into the
 	// membership list.
 	var (
-		accepted     bool
-		emitTrans    bool
-		fromState    string // "" if this is a join, else previous state name
-		toState      string
+		accepted  bool
+		emitTrans bool
+		fromState string // "" if this is a join, else previous state name
+		toState   string
 	)
 
 	ml.mu.Lock()

@@ -61,13 +61,13 @@ func TestMethodLabel_AllowedPassThrough(t *testing.T) {
 // per unique token.
 func TestMethodLabel_UnknownBucketed(t *testing.T) {
 	bogus := []string{
-		"HACK",         // entirely fabricated
-		"get",          // wrong case (HTTP methods are case-sensitive per RFC)
-		"GET ",         // trailing space — common smuggling probe shape
-		" GET",         // leading whitespace
-		"HACK123",      // junk
-		"PROPFINDX",    // looks like a real verb but isn't
-		"\u0000",       // NUL byte
+		"HACK",                   // entirely fabricated
+		"get",                    // wrong case (HTTP methods are case-sensitive per RFC)
+		"GET ",                   // trailing space — common smuggling probe shape
+		" GET",                   // leading whitespace
+		"HACK123",                // junk
+		"PROPFINDX",              // looks like a real verb but isn't
+		"\u0000",                 // NUL byte
 		strings.Repeat("A", 256), // long-string overflow attempt
 	}
 	for _, m := range bogus {

@@ -30,14 +30,14 @@ type Metrics struct {
 	registry *prometheus.Registry
 
 	// HTTP request flow ------------------------------------------------
-	RequestsTotal       *prometheus.CounterVec   // labels: backend, status_class, method
-	RequestDuration     *prometheus.HistogramVec // labels: backend, status_class
-	RequestsDropped     *prometheus.CounterVec   // labels: reason — pre-select 5xx
-	WebsocketTotal      *prometheus.CounterVec   // labels: backend
-	BackendPoolSize     prometheus.Gauge         // current alive-backend count
-	SelectorDecisions   *prometheus.CounterVec   // labels: strategy, backend
-	BackendActiveConns  *prometheus.GaugeVec     // labels: backend — live conn count
-	BackendLatencyEWMA  *prometheus.GaugeVec     // labels: backend — EWMA seconds
+	RequestsTotal      *prometheus.CounterVec   // labels: backend, status_class, method
+	RequestDuration    *prometheus.HistogramVec // labels: backend, status_class
+	RequestsDropped    *prometheus.CounterVec   // labels: reason — pre-select 5xx
+	WebsocketTotal     *prometheus.CounterVec   // labels: backend
+	BackendPoolSize    prometheus.Gauge         // current alive-backend count
+	SelectorDecisions  *prometheus.CounterVec   // labels: strategy, backend
+	BackendActiveConns *prometheus.GaugeVec     // labels: backend — live conn count
+	BackendLatencyEWMA *prometheus.GaugeVec     // labels: backend — EWMA seconds
 
 	// Gossip flow -----------------------------------------------------
 	GossipMessagesSent     *prometheus.CounterVec // labels: type
@@ -47,9 +47,9 @@ type Metrics struct {
 	GossipLifeguardNoop    prometheus.Gauge       // current self-awareness score
 
 	// Health-check flow -----------------------------------------------
-	HealthChecksTotal      *prometheus.CounterVec   // labels: result (healthy|degraded|unhealthy|error)
-	HealthCheckDuration    *prometheus.HistogramVec // labels: result
-	HealthStatusTransitions *prometheus.CounterVec  // labels: from, to
+	HealthChecksTotal       *prometheus.CounterVec   // labels: result (healthy|degraded|unhealthy|error)
+	HealthCheckDuration     *prometheus.HistogramVec // labels: result
+	HealthStatusTransitions *prometheus.CounterVec   // labels: from, to
 }
 
 // New builds a fresh registry and the full set of collectors. Every

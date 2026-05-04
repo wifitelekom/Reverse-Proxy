@@ -332,8 +332,10 @@ func splitSeeds(s string) []string {
 // imports — preserves the layering rule that metrics is a leaf dependency.
 type metricsAdapter struct{ m *metrics.Metrics }
 
-func (a metricsAdapter) OnMessageSent(t string)     { a.m.GossipMessagesSent.WithLabelValues(t).Inc() }
-func (a metricsAdapter) OnMessageReceived(t string) { a.m.GossipMessagesReceived.WithLabelValues(t).Inc() }
+func (a metricsAdapter) OnMessageSent(t string) { a.m.GossipMessagesSent.WithLabelValues(t).Inc() }
+func (a metricsAdapter) OnMessageReceived(t string) {
+	a.m.GossipMessagesReceived.WithLabelValues(t).Inc()
+}
 func (a metricsAdapter) OnMessageRejected(reason string) {
 	a.m.GossipMessagesRejected.WithLabelValues(reason).Inc()
 }
