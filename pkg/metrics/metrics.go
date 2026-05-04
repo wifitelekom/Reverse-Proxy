@@ -30,12 +30,14 @@ type Metrics struct {
 	registry *prometheus.Registry
 
 	// HTTP request flow ------------------------------------------------
-	RequestsTotal     *prometheus.CounterVec   // labels: backend, status_class, method
-	RequestDuration   *prometheus.HistogramVec // labels: backend, status_class
-	RequestsDropped   *prometheus.CounterVec   // labels: reason — pre-select 5xx
-	WebsocketTotal    *prometheus.CounterVec   // labels: backend
-	BackendPoolSize   prometheus.Gauge         // current alive-backend count
-	SelectorDecisions *prometheus.CounterVec   // labels: strategy, backend
+	RequestsTotal       *prometheus.CounterVec   // labels: backend, status_class, method
+	RequestDuration     *prometheus.HistogramVec // labels: backend, status_class
+	RequestsDropped     *prometheus.CounterVec   // labels: reason — pre-select 5xx
+	WebsocketTotal      *prometheus.CounterVec   // labels: backend
+	BackendPoolSize     prometheus.Gauge         // current alive-backend count
+	SelectorDecisions   *prometheus.CounterVec   // labels: strategy, backend
+	BackendActiveConns  *prometheus.GaugeVec     // labels: backend — live conn count
+	BackendLatencyEWMA  *prometheus.GaugeVec     // labels: backend — EWMA seconds
 
 	// Gossip flow -----------------------------------------------------
 	GossipMessagesSent     *prometheus.CounterVec // labels: type
@@ -114,6 +116,22 @@ func New() *Metrics {
 			},
 			[]string{"strategy", "backend"},
 		),
+		BackendActiveConns: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Namespace: "lb",
+				Name:      "backend_active_connections",
+				Help:      "Current count of in-flight requests per backend, as observed at the moment the most recent request for that backend completed. The numerator the LeastConnections selector minimises and one of the two signals P2C samples on.",
+			},
+			[]string{"backend"},
+		),
+		BackendLatencyEWMA: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Namespace: "lb",
+				Name:      "backend_latency_ewma_seconds",
+				Help:      "Exponentially-weighted moving average of backend response time, in seconds, as last observed by the load balancer. The signal P2CEWMA selects on; useful for spotting a backend whose latency is drifting before the SLO alarm fires. Zero indicates no measurements have been taken yet.",
+			},
+			[]string{"backend"},
+		),
 
 		GossipMessagesSent: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
@@ -189,6 +207,8 @@ func New() *Metrics {
 		m.WebsocketTotal,
 		m.BackendPoolSize,
 		m.SelectorDecisions,
+		m.BackendActiveConns,
+		m.BackendLatencyEWMA,
 		m.GossipMessagesSent,
 		m.GossipMessagesReceived,
 		m.GossipMessagesRejected,

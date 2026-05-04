@@ -451,6 +451,23 @@ func (lb *LoadBalancer) handleRequest(w http.ResponseWriter, r *http.Request) {
 		method := metrics.MethodLabel(r.Method)
 		lb.metrics.RequestsTotal.WithLabelValues(selected.NodeID, class, method).Inc()
 		lb.metrics.RequestDuration.WithLabelValues(selected.NodeID, class).Observe(elapsed.Seconds())
+
+		// Per-backend live gauges. We snapshot AT EMISSION TIME — the
+		// ActiveConns reading still includes this request (the deferred
+		// decrement hasn't fired yet), and LatencyEWMA reflects the
+		// just-recorded sample. Both are the values the next selector
+		// invocation would see, which is what an operator wants to
+		// observe when debugging "why is this backend losing traffic?".
+		//
+		// Bounded cardinality: the {backend} label is bounded by cluster
+		// size. Stale series for departed backends fade through Prometheus'
+		// staleness window (default 5m) — we deliberately do NOT delete
+		// gauges on backend removal, because gossip can flap and a
+		// re-appearing backend should keep its lineage in the registry.
+		lb.metrics.BackendActiveConns.WithLabelValues(selected.NodeID).
+			Set(float64(atomic.LoadInt32(&selected.ActiveConns)))
+		lb.metrics.BackendLatencyEWMA.WithLabelValues(selected.NodeID).
+			Set(float64(atomic.LoadInt64(&selected.LatencyEWMA)) / 1e9)
 	}
 }
 

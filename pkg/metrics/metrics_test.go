@@ -137,6 +137,8 @@ func TestNew_AllCollectorsExposed(t *testing.T) {
 	m.WebsocketTotal.WithLabelValues("b").Inc()
 	m.BackendPoolSize.Set(0)
 	m.SelectorDecisions.WithLabelValues("rr", "b").Inc()
+	m.BackendActiveConns.WithLabelValues("b").Set(3)
+	m.BackendLatencyEWMA.WithLabelValues("b").Set(0.05)
 	m.GossipMessagesSent.WithLabelValues("PING").Inc()
 	m.GossipMessagesReceived.WithLabelValues("PING").Inc()
 	m.GossipMessagesRejected.WithLabelValues("source_mismatch").Inc()
@@ -158,6 +160,8 @@ func TestNew_AllCollectorsExposed(t *testing.T) {
 		"lb_websocket_upgrades_total",
 		"lb_backend_pool_size",
 		"lb_selector_decisions_total",
+		"lb_backend_active_connections",
+		"lb_backend_latency_ewma_seconds",
 		"gossip_messages_sent_total",
 		"gossip_messages_received_total",
 		"gossip_messages_rejected_total",
