@@ -3,7 +3,7 @@
 A self-organizing HTTP load balancer that needs no central service registry.
 Backends and load balancers discover each other via the SWIM gossip protocol;
 HashiCorp's Lifeguard extensions harden it against false positives under
-stress. Built in Go, race-clean, with ~210 tests covering everything from
+stress. Built in Go, race-clean, with 230+ tests covering everything from
 the SWIM state machine to TLS hot-reload.
 
 ## What this replaces
@@ -150,6 +150,7 @@ Three precedence layers. Highest wins:
 
 Sample configs in `configs/` — `loadbalancer.json`, `loadbalancer.toml`,
 `loadbalancer-lifeguard.json`, `loadbalancer-healthcheck.json`,
+`loadbalancer-tls.json` (full TLS / mTLS / backend-TLS reference),
 `node.json`.
 
 ### Environment variables (subset)
@@ -342,7 +343,8 @@ go test ./...
 go test -race ./...
 ```
 
-~210 tests across six packages:
+230+ tests across six packages (run `go test -v ./... | grep -c '^=== RUN'`
+for the live count — covered automatically in CI by `.github/workflows/test.yml`):
 
 | Package | What's covered |
 | --- | --- |
@@ -370,6 +372,7 @@ accumulating.
 │   ├── loadbalancer.json|.toml
 │   ├── loadbalancer-lifeguard.json
 │   ├── loadbalancer-healthcheck.json
+│   ├── loadbalancer-tls.json
 │   └── node.json
 └── pkg/
     ├── types/          # Wire-level config types (ProtocolConfig, LBConfig, ...)

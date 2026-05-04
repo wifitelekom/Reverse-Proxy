@@ -1,0 +1,70 @@
+{
+  "//": "Comprehensive TLS / mTLS / backend-TLS / health-check example. Every optional security feature is enabled and annotated. Strip the sections you don't need before deploying. Zero-value fields fall back to the defaults baked into pkg/config; documented inline below.",
+
+  "listen": ":8443",
+  "strategy": "p2c-ewma",
+  "gossip_addr": ":9000",
+  "node_id": "lb-tls",
+  "seed_nodes": [":9001", ":9002", ":9003"],
+  "shutdown_timeout": "30s",
+
+  "protocol": {
+    "interval": "1s",
+    "ping_timeout": "500ms",
+    "indirect_timeout": "1s",
+    "suspect_timeout": "3s",
+    "indirect_nodes": 3,
+
+    "//lifeguard": "Recommended on under any kind of load — Self-Awareness scaling absorbs head-of-line jitter that would otherwise mark healthy nodes suspect.",
+    "lifeguard_enabled": true,
+    "self_awareness_max": 8
+  },
+
+  "tls": {
+    "//": "Frontend HTTPS — terminates TLS for client→LB traffic. Requires both cert_file and key_file when enabled.",
+    "enabled": true,
+    "cert_file": "/etc/lb/tls/server.crt",
+    "key_file": "/etc/lb/tls/server.key",
+
+    "//min_version": "1.2 is the floor; 1.3 if your clients support it. Older versions (1.0/1.1) are intentionally not exposed — known weak.",
+    "min_version": "1.3",
+
+    "//client_ca_file": "Set this to a PEM bundle of trusted client CAs to enable mTLS. Clients without a cert signed by one of those CAs are rejected at handshake. Empty / unset = mTLS off.",
+    "client_ca_file": "/etc/lb/tls/clients-ca.pem",
+
+    "//auto_reload": "Re-reads cert+key from disk on a timer so cert-manager rotations land without a restart. Atomic.Pointer swap — in-flight handshakes are not affected.",
+    "auto_reload": true,
+    "reload_interval": "1h"
+  },
+
+  "backend_tls": {
+    "//": "LB → backend HTTPS leg. Independent of frontend TLS: the LB can terminate at the edge and re-encrypt to backends, or do straight pass-through, or neither.",
+    "enabled": true,
+
+    "//skip_verify": "DEV ONLY. With self-signed backend certs in production prefer setting ca_file to your private CA bundle. The validator logs a warning whenever this is true alongside enabled.",
+    "skip_verify": false,
+
+    "//ca_file": "PEM bundle of additional trusted CAs for backend certs. Empty = use the system trust store.",
+    "ca_file": "/etc/lb/tls/backend-ca.pem"
+  },
+
+  "health_check": {
+    "//": "HTTP-level checker that runs alongside SWIM gossip. Gossip-alive but health-failed backends are excluded from selection. Disabled by default; opt in per environment.",
+    "enabled": true,
+    "interval": "5s",
+    "timeout": "2s",
+    "path": "/health",
+
+    "//thresholds": "Consecutive successes/failures before flipping state. Higher numbers = slower transitions, fewer flapping events under transient noise.",
+    "healthy_threshold": 2,
+    "unhealthy_threshold": 3,
+
+    "//degraded_latency": "2xx responses slower than this count as Degraded. Degraded backends still receive traffic but are deprioritised by latency-aware selectors (P2C-EWMA).",
+    "degraded_latency": "1s"
+  },
+
+  "logging": {
+    "level": "info",
+    "format": "json"
+  }
+}
