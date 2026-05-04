@@ -3,9 +3,38 @@ package gossip
 import (
 	"log/slog"
 	"math/rand"
+	"net/netip"
 	"sync"
 	"time"
 )
+
+// canonicalSourceAddr normalises an "ip:port" string so that two logically
+// equivalent representations of the same UDP peer compare equal in the
+// pinned-source check.
+//
+// Two real-world drift sources motivated this:
+//
+//  1. IPv6 zone IDs. A link-local address picks up a "%zone" suffix from
+//     the receiving interface (`[fe80::1%eth0]:9001` vs `[fe80::1%lo0]:9001`).
+//     The same peer reaching us via two interfaces — or after a NIC swap —
+//     would otherwise look like an impersonator.
+//
+//  2. IPv4-mapped IPv6. A dual-stack listener may report the same peer as
+//     `192.0.2.1:9001` on one socket and `[::ffff:192.0.2.1]:9001` on
+//     another. They are the same address.
+//
+// netip.ParseAddrPort + Addr.Unmap + Addr.WithZone("") is the documented
+// way to fold both shapes into a canonical form. If parsing fails (e.g.
+// hostname:port or malformed input), we return the original string so
+// the original byte-for-byte comparison still works as a fallback.
+func canonicalSourceAddr(s string) string {
+	ap, err := netip.ParseAddrPort(s)
+	if err != nil {
+		return s
+	}
+	addr := ap.Addr().Unmap().WithZone("")
+	return netip.AddrPortFrom(addr, ap.Port()).String()
+}
 
 // nodeEntry is the private membership-table record. Pointers to it never
 // leave this file; callers receive copies of NodeInfo so they cannot
@@ -117,6 +146,11 @@ func (ml *MembershipList) VerifyOrPinSource(nodeID, srcAddr string) SourceVerifi
 	if nodeID == "" || srcAddr == "" {
 		return SourceUnknownTOFU // caller decides; missing data isn't itself spoofing
 	}
+	// Canonicalise on every entry into the comparator. Stored values are
+	// already canonical (we only ever assign through canonicalSourceAddr
+	// below), so normalising the input is enough to make the equality
+	// check robust to zone-ID drift and IPv4-mapped IPv6 dual-stack noise.
+	srcAddr = canonicalSourceAddr(srcAddr)
 	ml.mu.Lock()
 	defer ml.mu.Unlock()
 	entry, ok := ml.members[nodeID]
@@ -144,6 +178,10 @@ func (ml *MembershipList) PinSourceIfAbsent(nodeID, srcAddr string) bool {
 	if nodeID == "" || srcAddr == "" {
 		return false
 	}
+	// Canonicalise before storing so future VerifyOrPinSource lookups
+	// with a differently-shaped (but logically identical) address still
+	// match. Mirrors the normalisation step in VerifyOrPinSource.
+	srcAddr = canonicalSourceAddr(srcAddr)
 	ml.mu.Lock()
 	defer ml.mu.Unlock()
 	entry, ok := ml.members[nodeID]
