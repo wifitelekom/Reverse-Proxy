@@ -238,4 +238,21 @@ type LBConfig struct {
 	TLS             TLSConfig
 	BackendTLS      BackendTLSConfig
 	Admin           AdminConfig
+
+	// WebSocketStripHeaders lists request headers to remove before
+	// replaying a WebSocket upgrade to the backend. Empty (the default)
+	// preserves the historical behaviour of forwarding every header
+	// the client sent — including Cookie, Authorization, and Origin.
+	//
+	// When the LB sits behind another proxy that already handles auth,
+	// or when the operator wants to scrub client cookies off the
+	// backend leg, listing the relevant header names here causes the
+	// upgrade to be replayed without them.
+	//
+	// Matching is case-insensitive (per RFC 7230 §3.2). The standard
+	// WebSocket handshake headers (Upgrade, Connection, Sec-WebSocket-*,
+	// Host) are NEVER stripped even if listed — removing them would
+	// break the handshake itself, so we ignore those entries with a
+	// warning at startup.
+	WebSocketStripHeaders []string
 }

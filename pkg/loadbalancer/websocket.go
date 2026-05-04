@@ -86,9 +86,25 @@ func (lb *LoadBalancer) proxyWebSocket(w http.ResponseWriter, r *http.Request, b
 	}
 	defer backendConn.Close()
 
-	// 2. Replay the client's request to the backend exactly as received.
+	// 2. Replay the client's request to the backend.
+	//
 	// http.Request.Write produces an HTTP/1.1 wire-format request that
-	// includes Host, Connection: Upgrade, Sec-WebSocket-Key, etc.
+	// includes Host, Connection: Upgrade, Sec-WebSocket-Key, etc. By
+	// default we forward EVERY header the client sent — including
+	// Cookie, Authorization, and Origin — because most WebSocket apps
+	// authenticate on the upgrade and would break otherwise.
+	//
+	// Operators who terminate auth at a fronting proxy (or want to
+	// scrub client cookies off the backend leg) can list header names
+	// in WebSocketStripHeaders. Stripping happens here, post-dial,
+	// pre-write, on the original Header map. Protected handshake
+	// headers were filtered out at construction time so this loop
+	// can't accidentally break the upgrade.
+	if len(lb.wsStripHeaders) > 0 {
+		for name := range lb.wsStripHeaders {
+			r.Header.Del(name)
+		}
+	}
 	if err := r.Write(backendConn); err != nil {
 		lb.logger.Error("websocket: forward request failed", "err", err)
 		http.Error(w, "backend unavailable", http.StatusBadGateway)

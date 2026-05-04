@@ -81,6 +81,9 @@ on doesn't surprise you.
 | | `/_lb/health` admin endpoint (JSON) | off |
 | | `/_lb/metrics` admin endpoint (Prometheus exposition) | off |
 | | Token-bucket rate limiter on `/_lb/*` admin paths | on when metrics is on |
+| | CIDR allowlist + bearer token on `/_lb/*` (constant-time compare) | off |
+| **WebSocket** | Header forwarding (Cookie / Authorization / Origin pass through) | default |
+| | Per-header strip list (post-dial, pre-write) | off |
 
 ## Quickstart
 
@@ -247,6 +250,34 @@ config block:
 - When both are set, BOTH must pass — defense in depth.
 - An unauthorised caller gets a 404 (path-existence is not confirmed)
   and does not consume rate-limit budget.
+
+### WebSocket header forwarding
+
+The WebSocket proxy hijacks the client connection and replays the
+upgrade request to the chosen backend verbatim — including **every
+client header**: `Cookie`, `Authorization`, `Origin`, `User-Agent`,
+custom `X-*` headers, etc. This is the historical and default
+behaviour because most WebSocket apps authenticate on the upgrade
+and would break if their auth headers were dropped.
+
+If the LB sits behind a fronting proxy that already handles auth, or
+if you want to scrub client cookies off the backend leg, set
+`websocket_strip_headers` to the list of header names to remove
+before the upgrade is replayed:
+
+```json
+{
+  "websocket_strip_headers": ["Cookie", "Authorization"]
+}
+```
+
+Matching is case-insensitive (`cookie`, `Cookie`, and `COOKIE` all
+match the same header). The handshake-essential headers — `Upgrade`,
+`Connection`, `Host`, `Sec-WebSocket-Key`, `Sec-WebSocket-Version`,
+`Sec-WebSocket-Protocol`, `Sec-WebSocket-Accept` — are **never**
+strippable; listing them logs a startup warning and the entry is
+ignored. Removing those would silently break the WebSocket protocol
+itself.
 
 ## Metrics
 

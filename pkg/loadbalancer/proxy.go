@@ -142,6 +142,13 @@ type LoadBalancer struct {
 	// "no token check". Compared in constant time to defeat timing
 	// oracles.
 	adminBearerToken string
+
+	// wsStripHeaders is the canonicalised set of request-header names
+	// to drop before replaying a WebSocket upgrade to the backend.
+	// Map form for O(1) lookup in the per-upgrade hot path; values
+	// are stored in textproto canonical form so MIMEHeader operations
+	// hit them directly.
+	wsStripHeaders map[string]struct{}
 }
 
 // AdminRateLimit are the defaults applied when the LB enables rate
@@ -290,7 +297,61 @@ func NewLoadBalancer(
 			"bearer_token", lb.adminBearerToken != "")
 	}
 
+	// WebSocket header strip list. Build a canonical set so the per-
+	// upgrade path can do an O(1) lookup. We refuse to honour entries
+	// that would break the handshake itself (Upgrade, Connection, Host,
+	// Sec-WebSocket-*) — listing those is almost certainly a config
+	// mistake, and silently complying would produce an undebuggable
+	// "the upgrade just hangs" symptom.
+	if len(cfg.WebSocketStripHeaders) > 0 {
+		protected := map[string]struct{}{
+			"Upgrade":                {},
+			"Connection":             {},
+			"Host":                   {},
+			"Sec-Websocket-Key":      {},
+			"Sec-Websocket-Version":  {},
+			"Sec-Websocket-Protocol": {},
+			"Sec-Websocket-Accept":   {},
+			// textproto.CanonicalMIMEHeaderKey lowercases all but the
+			// first letter of each dash-separated segment, hence the
+			// "Websocket" rather than "WebSocket" form above.
+		}
+		strip := make(map[string]struct{}, len(cfg.WebSocketStripHeaders))
+		var skipped []string
+		for _, h := range cfg.WebSocketStripHeaders {
+			h = strings.TrimSpace(h)
+			if h == "" {
+				continue
+			}
+			ck := http.CanonicalHeaderKey(h)
+			if _, isProtected := protected[ck]; isProtected {
+				skipped = append(skipped, ck)
+				continue
+			}
+			strip[ck] = struct{}{}
+		}
+		if len(strip) > 0 {
+			lb.wsStripHeaders = strip
+			logger.Info("websocket: stripping client headers before backend forward",
+				"headers", keysOf(strip))
+		}
+		if len(skipped) > 0 {
+			logger.Warn("websocket: ignoring strip entries that would break the handshake",
+				"ignored", skipped)
+		}
+	}
+
 	return lb, nil
+}
+
+// keysOf returns the keys of a string-keyed set in unsorted order.
+// Used only for log output, where allocation cost is irrelevant.
+func keysOf(m map[string]struct{}) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
 }
 
 // Start launches the HTTP server — blocking.

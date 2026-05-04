@@ -164,6 +164,12 @@ type LBConfig struct {
 	BackendTLS      BackendTLSCfg  `json:"backend_tls"       toml:"backend_tls"`
 	Admin           AdminCfg       `json:"admin"             toml:"admin"`
 	Logging         LoggingCfg     `json:"logging"           toml:"logging"`
+
+	// WebSocketStripHeaders lists request headers to remove before
+	// replaying a WS upgrade to the backend. See types.LBConfig for
+	// the full contract; empty list preserves the historical
+	// pass-everything-through behaviour.
+	WebSocketStripHeaders []string `json:"websocket_strip_headers" toml:"websocket_strip_headers"`
 }
 
 // DefaultProtocolCfg returns production-safe SWIM defaults.
@@ -285,17 +291,18 @@ func (p ProtocolCfg) ToInternalProtocol(nodeID, gossipAddr, serviceAddr string, 
 // ToInternal converts an LBConfig to the existing types.LBConfig.
 func (c LBConfig) ToInternal() types.LBConfig {
 	return types.LBConfig{
-		ListenAddr:      c.Listen,
-		Strategy:        c.Strategy,
-		GossipAddr:      c.GossipAddr,
-		NodeID:          c.NodeID,
-		SeedNodes:       c.SeedNodes,
-		ShutdownTimeout: c.ShutdownTimeout.Duration,
-		Protocol:        c.Protocol.ToInternalProtocol(c.NodeID, c.GossipAddr, "", c.SeedNodes),
-		HealthCheck:     c.HealthCheck.ToInternal(),
-		TLS:             c.TLS.ToInternal(),
-		BackendTLS:      c.BackendTLS.ToInternal(),
-		Admin:           c.Admin.ToInternal(),
+		ListenAddr:            c.Listen,
+		Strategy:              c.Strategy,
+		GossipAddr:            c.GossipAddr,
+		NodeID:                c.NodeID,
+		SeedNodes:             c.SeedNodes,
+		ShutdownTimeout:       c.ShutdownTimeout.Duration,
+		Protocol:              c.Protocol.ToInternalProtocol(c.NodeID, c.GossipAddr, "", c.SeedNodes),
+		HealthCheck:           c.HealthCheck.ToInternal(),
+		TLS:                   c.TLS.ToInternal(),
+		BackendTLS:            c.BackendTLS.ToInternal(),
+		Admin:                 c.Admin.ToInternal(),
+		WebSocketStripHeaders: c.WebSocketStripHeaders,
 	}
 }
 
