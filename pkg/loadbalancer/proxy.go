@@ -381,6 +381,15 @@ func keysOf(m map[string]struct{}) []string {
 // are passed empty because the *tls.Config's GetCertificate callback
 // supplies them — that callback reads from the CertManager so hot-reload
 // works.
+// Handler returns the load balancer's HTTP handler. Useful for embedding
+// the LB into an external httptest.Server (experiments, integration
+// benches) without going through Start(). Production deployments should
+// keep using Start(), which wires up TLS, hot-reload, and graceful
+// shutdown.
+func (lb *LoadBalancer) Handler() http.Handler {
+	return http.HandlerFunc(lb.handleRequest)
+}
+
 func (lb *LoadBalancer) Start(ctx context.Context) error {
 	// shutdownBudget is the time window we give in-flight requests to
 	// finish during graceful shutdown. The previous hardcoded 5s was
