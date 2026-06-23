@@ -67,7 +67,7 @@ green "  Demo complete."
 echo "  For the live cluster finale, in a fresh terminal run:"
 echo "      ./scripts/run_cluster.sh build && ./scripts/run_cluster.sh start"
 echo "      curl -s http://localhost:8001/members | python3 -m json.tool"
-echo "      for i in \$(seq 1 8); do curl -s http://localhost:8080/; echo; done"
+echo "      for i in \$(seq 1 8); do curl -s http://localhost:8080/ -w '\\\\n'; done"
 echo "      go run ./cmd/simulator -cmd=kill -node=node-c   # watch failover"
 echo "      ./scripts/run_cluster.sh stop"
 rule

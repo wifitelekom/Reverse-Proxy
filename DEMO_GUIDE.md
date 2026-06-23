@@ -171,15 +171,22 @@ gossip, never from a config file or registry.
 
 ### 5c. Send traffic through the load balancer
 ```bash
-for i in $(seq 1 8); do curl -s http://localhost:8080/ ; echo; done
+for i in $(seq 1 8); do curl -s http://localhost:8080/ -w '\n'; done
 ```
 Point at: responses rotate across `node-a..d` — the LB is proxying to
 backends it discovered via the ring.
 
+> The `-w '\n'` just adds a line break after each response. (Avoid the
+> `... ; echo` form when pasting — some terminals mangle the `;`.) If you
+> see `no healthy backends available`, the LB is still learning the ring —
+> wait a couple of seconds and retry. `run_cluster.sh start` already waits
+> for the LB to be ready before it prints "Cluster hazır", so this only
+> happens if you start the LB by hand.
+
 ### 5d. Kill a backend and watch failover live
 ```bash
 # In one terminal, hammer the LB:
-while true; do curl -s http://localhost:8080/ ; echo; sleep 0.3; done
+while true; do curl -s http://localhost:8080/ -w '\n'; sleep 0.3; done
 
 # In another terminal, kill a node:
 go run ./cmd/simulator -cmd=kill -node=node-c

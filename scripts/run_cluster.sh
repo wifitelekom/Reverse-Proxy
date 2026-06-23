@@ -92,11 +92,29 @@ start_cluster() {
     echo $! > "$PID_DIR/lb.pid"
     echo "✓ loadbalancer başlatıldı (HTTP :8080, Gossip UDP :9000)"
 
+    # Load balancer'ın backend'leri gossip ile öğrenmesini bekle. Aksi
+    # halde hemen gönderilen istekler "no healthy backends available"
+    # döner — LB henüz ring'i öğrenmemiştir.
+    echo "Load balancer backend'leri keşfediyor..."
+    ready=0
+    for _ in $(seq 1 20); do
+        body="$(curl -s http://localhost:8080/ 2>/dev/null || true)"
+        case "$body" in
+            *'"status":"ok"'*) ready=1; break ;;
+        esac
+        sleep 0.5
+    done
+    if [ "$ready" = "1" ]; then
+        echo "✓ Load balancer trafik almaya hazır"
+    else
+        echo "⚠ Load balancer henüz hazır değil — birkaç saniye bekleyip tekrar deneyin"
+    fi
+
     echo ""
     echo "=== Cluster hazır ==="
-    echo "Test: curl http://localhost:8080/"
+    echo "Test:         curl http://localhost:8080/"
     echo "Gossip state: curl http://localhost:8001/members"
-    echo "Logs: $LOG_DIR/"
+    echo "Logs:         $LOG_DIR/"
 }
 
 stop_cluster() {
