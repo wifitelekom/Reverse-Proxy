@@ -10,3 +10,5 @@ tasks/
 /simulator
 .DS_Store
 .idea/
+/charts/
+chartenv/
